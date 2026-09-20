@@ -1,0 +1,94 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="color-scheme" content="dark">
+<title>動画編集 — ステップ1: 書き出しの検証</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%234f93ff'/%3E%3Cpath d='M13 10l9 6-9 6z' fill='%23fff'/%3E%3C/svg%3E">
+<link rel="stylesheet" href="./src/ui/style.css">
+</head>
+<body>
+<main class="app">
+
+  <!-- 1. プレビュー -->
+  <section class="panel preview-panel">
+    <div class="preview">
+      <video id="video" playsinline webkit-playsinline></video>
+      <p id="previewPlaceholder" class="placeholder">動画を開いてください</p>
+    </div>
+    <!-- 縦のdBメーターはステップ3でここに入る -->
+  </section>
+
+  <!-- 2. 操作バー -->
+  <section class="panel">
+    <div class="controls">
+      <button id="openBtn" class="btn" type="button">ファイルを開く</button>
+      <button id="playBtn" class="btn btn-primary" type="button" disabled>再生</button>
+      <button id="cutBtn" class="btn" type="button" disabled>ここでカット</button>
+      <span id="timeDisplay" class="time" aria-live="off">0:00.0 / 0:00.0</span>
+    </div>
+    <input id="fileInput" class="visually-hidden" type="file" accept="video/*">
+    <p id="sourceInfo" class="muted"></p>
+  </section>
+
+  <!-- 3. タイムライン -->
+  <section class="panel">
+    <h2 class="panel-title">タイムライン</h2>
+    <canvas id="timeline" class="timeline" height="72"></canvas>
+    <p class="muted">タップでシーク。波形とマーカーはステップ3・7で入ります。</p>
+  </section>
+
+  <!-- 4. クリップ一覧 -->
+  <section class="panel">
+    <h2 class="panel-title">クリップ</h2>
+    <div id="clipList" class="clip-list"></div>
+    <div id="speedBar" class="speed-bar" hidden>
+      <span class="speed-label">速度</span>
+      <div class="speed-buttons" id="speedButtons"></div>
+    </div>
+  </section>
+
+  <!-- 8. 書き出し -->
+  <section class="panel">
+    <h2 class="panel-title">書き出し</h2>
+    <div class="quality" id="qualityButtons" role="radiogroup" aria-label="画質"></div>
+    <p id="exportEstimate" class="muted"></p>
+    <button id="exportBtn" class="btn btn-primary btn-wide" type="button" disabled>書き出す</button>
+
+    <div id="progressBox" class="progress-box" hidden>
+      <div class="progress-track"><div id="progressBar" class="progress-bar"></div></div>
+      <p id="progressText" class="progress-text">準備中…</p>
+      <p class="warn-text">書き出しが終わるまで画面を閉じないでください。</p>
+      <button id="cancelBtn" class="btn btn-danger" type="button">中止</button>
+    </div>
+
+    <div id="resultBox" class="result-box" hidden>
+      <p id="resultText" class="result-text"></p>
+      <p id="resultCodecs" class="muted"></p>
+      <div class="result-actions">
+        <button id="shareBtn" class="btn btn-primary" type="button" hidden>保存・共有</button>
+        <button id="downloadBtn" class="btn" type="button">ダウンロード</button>
+      </div>
+      <video id="resultPreview" class="result-preview" controls playsinline></video>
+    </div>
+
+    <p id="exportError" class="error-text" hidden></p>
+  </section>
+
+  <!-- この端末の対応状況 -->
+  <section class="panel">
+    <h2 class="panel-title">この端末の対応状況</h2>
+    <p id="verdict" class="verdict">確認中…</p>
+    <ul id="capList" class="cap-list"></ul>
+    <button id="copyCapsBtn" class="btn btn-small" type="button">結果をコピー</button>
+  </section>
+
+  <footer class="footer">
+    <p>ステップ1: 書き出しの検証（カット・除外・速度変更・画質選択）</p>
+  </footer>
+</main>
+
+<script type="module" src="./src/main.js"></script>
+</body>
+</html>

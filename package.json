@@ -1,0 +1,15 @@
+{
+  "name": "mobile-video-editor",
+  "private": true,
+  "type": "module",
+  "description": "スマホのブラウザだけで完結する動画編集PWA。アプリ本体はビルド不要で、このpackage.jsonはテスト用。",
+  "scripts": {
+    "test": "node test/run-unit-tests.js && node test/run-browser-tests.js",
+    "test:unit": "node test/run-unit-tests.js",
+    "test:browser": "node test/run-browser-tests.js",
+    "dev": "node test/dev-server.js"
+  },
+  "devDependencies": {
+    "playwright": "^1.49.0"
+  }
+}

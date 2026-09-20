@@ -1,0 +1,83 @@
+/**
+ * ヘッドレスChromiumで書き出しの検証を走らせる。
+ *
+ *   node test/run-browser-tests.js
+ *
+ * ここで確かめるのはパイプラインの正しさ（カット・除外・速度・長さ・音ずれ）。
+ * H.264/AAC そのものが通るかは実機でしか分からないので、それは端末側で確認する。
+ */
+import { chromium } from 'playwright';
+import { fileURLToPath } from 'node:url';
+import { dirname, resolve } from 'node:path';
+import { serve } from './serve.js';
+
+const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
+const CHROMIUM = process.env.CHROMIUM_PATH || '/opt/pw-browsers/chromium';
+
+const { server, port } = await serve(ROOT);
+const browser = await chromium.launch({
+  executablePath: CHROMIUM,
+  args: ['--no-sandbox', '--autoplay-policy=no-user-gesture-required'],
+});
+
+let failed = 0;
+try {
+  const page = await browser.newPage();
+  page.on('console', (m) => {
+    if (m.type() === 'error') console.error('  [browser]', m.text());
+  });
+  page.on('pageerror', (e) => console.error('  [pageerror]', e.message));
+
+  /* --- 1. 書き出しパイプライン --- */
+  await page.goto(`http://localhost:${port}/test/harness.html`);
+  await page.waitForFunction(() => typeof window.__runSuite === 'function');
+  const results = await page.evaluate(() => window.__runSuite());
+
+  console.log('\n書き出しパイプライン');
+  for (const r of results) {
+    console.log(`  ${r.pass ? 'PASS' : 'FAIL'}  ${r.name}${r.detail ? `  (${r.detail})` : ''}`);
+    if (!r.pass) failed += 1;
+  }
+
+  /* --- 2. 画面が組み上がるか --- */
+  console.log('\n画面');
+  const errors = [];
+  const uiPage = await browser.newPage();
+  uiPage.on('pageerror', (e) => errors.push(e.message));
+  uiPage.on('console', (m) => m.type() === 'error' && errors.push(m.text()));
+  await uiPage.goto(`http://localhost:${port}/index.html`);
+  await uiPage.waitForFunction(() => document.querySelectorAll('#capList li').length > 0, null, {
+    timeout: 10_000,
+  });
+
+  const ui = await uiPage.evaluate(() => ({
+    caps: document.querySelectorAll('#capList li').length,
+    verdict: document.getElementById('verdict').textContent,
+    quality: document.querySelectorAll('#qualityButtons .btn').length,
+    speeds: [...document.querySelectorAll('#speedButtons .btn')].map((b) => b.textContent),
+    exportDisabled: document.getElementById('exportBtn').disabled,
+    timelineHeight: document.getElementById('timeline').height,
+  }));
+
+  const uiChecks = [
+    ['対応状況が9項目出る', ui.caps === 9, `${ui.caps}`],
+    ['画質ボタンが3つ', ui.quality === 3],
+    ['速度ボタンが6つ固定値', JSON.stringify(ui.speeds) === JSON.stringify(['×0.5', '×0.75', '×1', '×1.25', '×1.5', '×2']), ui.speeds.join(',')],
+    ['動画未読み込みでは書き出せない', ui.exportDisabled === true],
+    ['タイムラインのcanvasが実寸に合わせられる', ui.timelineHeight > 0, `${ui.timelineHeight}`],
+    ['JSエラーが出ない', errors.length === 0, errors.join(' | ')],
+  ];
+  for (const [name, pass, detail] of uiChecks) {
+    console.log(`  ${pass ? 'PASS' : 'FAIL'}  ${name}${detail ? `  (${detail})` : ''}`);
+    if (!pass) failed += 1;
+  }
+
+  // H.264が無いビルドなので、判定は「非対応」と出るのが正しい挙動
+  console.log(`\n  （このChromiumはH.264非対応のため、判定は "${ui.verdict.trim()}" になります）`);
+} finally {
+  await browser.close();
+  server.close();
+}
+
+console.log(failed === 0 ? '\n全て通りました。' : `\n${failed} 件失敗しました。`);
+process.exit(failed === 0 ? 0 : 1);
