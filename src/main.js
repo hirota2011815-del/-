@@ -714,6 +714,9 @@ function showResult(result, elapsedMs) {
     `処理 ${(elapsedMs / 1000).toFixed(1)}秒`,
   ];
   if (!result.hasAudio) parts.push('音声なし');
+  // エンコーダがフレームを落としていないか（latencyMode: 'realtime' の副作用）。
+  const dropped = (result.framesSubmitted ?? 0) - (result.packetsEncoded ?? 0);
+  if (dropped > 0) parts.push(`${dropped}フレーム欠落`);
   dom.resultText.textContent = `書き出しました — ${parts.join(' · ')}`;
 
   // 実機で何が動いたかを報告できるよう、使われたコーデック文字列も出す。

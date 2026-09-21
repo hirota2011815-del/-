@@ -34,6 +34,9 @@ const AUDIO_CHUNK_FRAMES = 2048;
 /** 映像のキーフレーム間隔（秒）。 */
 const KEY_FRAME_INTERVAL = 2;
 
+/** 時刻が前へ進まなかったときに足す最小の刻み（秒）。 */
+const MIN_FRAME_STEP = 1e-6;
+
 export class ExportCanceled extends Error {
   constructor() {
     super('書き出しを中止しました');
@@ -96,13 +99,33 @@ export async function runExport({
     // 実機で何が使われたか報告できるよう、エンコーダが実際に受け取った設定を控えておく。
     let videoEncoderConfig = null;
     let audioEncoderConfig = null;
+    // フレーム落ちの検出用（latencyMode: 'realtime' の副作用を見張る）。
+    let framesSubmitted = 0;
+    let packetsEncoded = 0;
 
     const videoSource = new VideoSampleSource({
       codec: codecs.video,
       bitrate: videoBitrate(quality, width, height),
       keyFrameInterval: KEY_FRAME_INTERVAL,
+      /*
+       * フレームの並べ替え（Bフレーム）を止める。
+       *
+       * 既定の 'quality' だと、エンコーダはキーフレームをまたいで参照する
+       * フレームを出すことがある。するとパケットが「表示順では前のGOPに属するのに
+       * キーフレームより後に出てくる」状態になり、mp4に詰める側の
+       *   「直前のキーフレーム時点の最大タイムスタンプより小さい値は入れられない」
+       * という検査に引っかかって書き出しが止まる。
+       * （実機のSafari/H.264で発生。Bフレームを出さないVP9のテストでは再現しない）
+       *
+       * 'realtime' は「詰まるとフレームを落とすことがある」とされているので、
+       * 投入したフレーム数と実際に出てきたパケット数を数えて食い違いを検出する。
+       */
+      latencyMode: 'realtime',
       onEncoderConfig: (config) => {
         videoEncoderConfig = { codec: config.codec, width: config.width, height: config.height, bitrate: config.bitrate };
+      },
+      onEncodedPacket: () => {
+        packetsEncoded += 1;
       },
     });
     // 回転はピクセルを回さずトラックのメタデータで持ち回す（縦向きで撮った動画が寝ないように）。
@@ -147,14 +170,17 @@ export async function runExport({
       : null;
 
     let cursor = 0; // 出力タイムライン上の現在位置（秒）
+    // 出した映像フレームの時刻はクリップをまたいで必ず前へ進める必要がある
+    // （mp4に詰める側が、時刻の巻き戻りを受け付けない）。
+    const videoClock = { lastTimestamp: -Infinity };
     for (let i = 0; i < clips.length; i += 1) {
       const clip = clips[i];
       const clipOutDuration = (clip.out - clip.in) / clip.speed;
       const detail = `クリップ ${i + 1}/${clips.length}`;
 
       // 映像と音声を同時に流すと同じ入力ファイルを2か所から読んで遅くなるので、順に処理する。
-      await writeClipVideo({
-        videoSink, videoSource, clip, cursor, totalOut, onProgress, checkCanceled, detail,
+      framesSubmitted += await writeClipVideo({
+        videoSink, videoSource, clip, cursor, totalOut, onProgress, checkCanceled, detail, videoClock,
       });
 
       if (audioSink && audioWriter) {
@@ -178,6 +204,8 @@ export async function runExport({
       height,
       videoEncoderConfig,
       audioEncoderConfig,
+      framesSubmitted,
+      packetsEncoded,
     };
   } catch (err) {
     if (output && output.state !== 'finalized') {
@@ -193,9 +221,19 @@ export async function runExport({
   }
 }
 
-/** 1クリップぶんの映像を、出力時刻に並べ直して書き込む。 */
-async function writeClipVideo({ videoSink, videoSource, clip, cursor, totalOut, onProgress, checkCanceled, detail }) {
-  let lastTimestamp = -Infinity;
+/**
+ * 1クリップぶんの映像を、出力時刻に並べ直して書き込む。
+ *
+ * `videoClock` はクリップをまたいで共有する。mp4に詰める側は時刻の巻き戻りを
+ * 受け付けないので、クリップの切れ目で前のクリップの最後のフレームを
+ * 追い越さないことを保証する必要がある。
+ *
+ * @returns {Promise<number>} 実際に投入したフレーム数
+ */
+async function writeClipVideo({
+  videoSink, videoSource, clip, cursor, totalOut, onProgress, checkCanceled, detail, videoClock,
+}) {
+  let submitted = 0;
 
   for await (const sample of videoSink.samples(clip.in, clip.out)) {
     try {
@@ -207,13 +245,14 @@ async function writeClipVideo({ videoSink, videoSource, clip, cursor, totalOut, 
       if (srcEnd <= srcStart) continue;
 
       let timestamp = cursor + (srcStart - clip.in) / clip.speed;
-      // タイムスタンプは必ず前へ進める（可変フレームレートで詰まったときの保険）。
-      if (timestamp <= lastTimestamp) timestamp = lastTimestamp + 1e-6;
-      lastTimestamp = timestamp;
+      // 可変フレームレートや切れ目の丸めで詰まっても、必ず前へ進める。
+      if (timestamp <= videoClock.lastTimestamp) timestamp = videoClock.lastTimestamp + MIN_FRAME_STEP;
+      videoClock.lastTimestamp = timestamp;
 
       sample.setTimestamp(timestamp);
       sample.setDuration((srcEnd - srcStart) / clip.speed);
       await videoSource.add(sample);
+      submitted += 1;
 
       if (totalOut > 0) {
         onProgress({ phase: 'encode', ratio: Math.min(0.98, timestamp / totalOut), detail });
@@ -222,6 +261,7 @@ async function writeClipVideo({ videoSink, videoSource, clip, cursor, totalOut, 
       sample.close();
     }
   }
+  return submitted;
 }
 
 /**

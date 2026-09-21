@@ -127,6 +127,57 @@ export async function runSuite() {
     `映像 ${actualDuration.toFixed(3)} / 音声 ${audioInfo.duration.toFixed(3)}`,
   );
 
+  /*
+   * 実機で出た不具合の回帰テスト。
+   *
+   * mp4に詰める側には「直前のキーフレーム時点の最大タイムスタンプより小さい値は
+   * 入れられない」という決まりがある。クリップを細かく分けると切れ目の数が増え、
+   * そこで時刻が巻き戻ると書き出しが止まる。
+   * 実機（Safari/H.264）ではエンコーダのフレーム並べ替えでこれが起き、
+   * latencyMode: 'realtime' で並べ替えを止めて直した。
+   * ここでは自分の側の時刻付けが、細かいクリップでも必ず前へ進むことを確かめる。
+   */
+  {
+    const manyClips = [];
+    let t = 0.05;
+    // 長さを不揃いにする（無音カットの結果はこうなる）
+    const lengths = [0.83, 0.42, 1.17, 0.35, 0.94, 0.51, 0.28, 0.76, 0.63, 0.39];
+    for (let i = 0; i < lengths.length && t + lengths[i] < FIXTURE.durationSec; i += 1) {
+      manyClips.push({ id: `m${i}`, in: t, out: t + lengths[i], speed: 1, enabled: true, filter: null });
+      t += lengths[i] + 0.11;
+    }
+
+    let exportedMany = null;
+    let manyError = null;
+    try {
+      exportedMany = await runExport({
+        file: source,
+        editList: { ...editList, clips: manyClips },
+        quality: 'standard',
+        codecs: TEST_CODECS,
+      });
+    } catch (err) {
+      manyError = err?.message ?? String(err);
+    }
+    check(`クリップを${manyClips.length}個に細かく分けても書き出せる`, manyError === null, manyError ?? '');
+
+    if (exportedMany) {
+      check(
+        'フレームが落ちていない',
+        exportedMany.framesSubmitted === exportedMany.packetsEncoded,
+        `投入 ${exportedMany.framesSubmitted} / 出力 ${exportedMany.packetsEncoded}`,
+      );
+
+      // 出来上がったファイルのフレーム時刻が、実際に前へ進んでいるか確かめる
+      const timestamps = await frameTimestamps(new File([exportedMany.buffer], 'many.mp4'));
+      let backwards = 0;
+      for (let i = 1; i < timestamps.length; i += 1) {
+        if (timestamps[i] < timestamps[i - 1]) backwards += 1;
+      }
+      check('出力フレームの時刻が巻き戻らない', backwards === 0, `巻き戻り ${backwards}回 / ${timestamps.length}フレーム`);
+    }
+  }
+
   // 全クリップ除外はエラーになること
   const allDisabled = { ...editList, clips: editList.clips.map((c) => ({ ...c, enabled: false })) };
   let threw = false;
@@ -160,6 +211,23 @@ async function sampleSeconds(file, timestamps) {
       // 端はエンコーダのリンギングが出るので中央を読む
       const px = ctx.getImageData(FIXTURE.width >> 1, FIXTURE.height >> 1, 1, 1).data;
       out.push(colorToSecond(px[0], px[1], px[2]));
+    }
+    return out;
+  } finally {
+    input.dispose();
+  }
+}
+
+/** 出力mp4の全フレームの表示時刻を、表示順で取り出す。 */
+async function frameTimestamps(file) {
+  const input = new Input({ source: new BlobSource(file), formats: ALL_FORMATS });
+  try {
+    const track = await input.getPrimaryVideoTrack();
+    const sink = new VideoSampleSink(track);
+    const out = [];
+    for await (const sample of sink.samples()) {
+      out.push(sample.timestamp);
+      sample.close();
     }
     return out;
   } finally {
