@@ -20,13 +20,14 @@
  * ステップ1では読み書きしないが、後のステップでそのまま使えるよう場所だけ確保してある。
  */
 
+import { defaultAudioSettings } from '../audio/effects.js';
+
 /** クリップ速度。自由入力にはしない（×2超は声が聞き取れず、×0.5未満は映像がカクつくため）。 */
 export const SPEEDS = [0.5, 0.75, 1, 1.25, 1.5, 2];
 
 /** これより短いクリップは作らない（秒）。カットとトリムの下限。 */
 export const MIN_CLIP_DURATION = 0.05;
 
-const DEFAULT_AUDIO = { normalizeGainDb: 0, highpassHz: 0, limiterDb: -1.5 };
 
 let idCounter = 0;
 function newClipId() {
@@ -40,7 +41,7 @@ export function createEditList(sourceName, duration) {
     source: sourceName,
     duration,
     clips: [makeClip(0, duration)],
-    audio: { ...DEFAULT_AUDIO },
+    audio: defaultAudioSettings(),
     markers: [],
   };
 }
@@ -101,6 +102,20 @@ export function toggleEnabled(list, id) {
 export function setSpeed(list, id, speed) {
   if (!SPEEDS.includes(speed)) return list;
   return mapClip(list, id, (c) => ({ ...c, speed }));
+}
+
+/**
+ * クリップ一覧をまるごと入れ替える（無音の自動カットで使う）。
+ * 速度と除外はリセットされるので、呼び出し側は元に戻せるようにしておくこと。
+ *
+ * @param {{in: number, out: number}[]} ranges 時間順に並んだ区間
+ */
+export function replaceClips(list, ranges) {
+  const clips = ranges
+    .filter((r) => r.out - r.in >= MIN_CLIP_DURATION)
+    .map((r) => makeClip(clamp(r.in, 0, list.duration), clamp(r.out, 0, list.duration)));
+  if (clips.length === 0) return list;
+  return { ...list, clips };
 }
 
 /**
@@ -241,7 +256,7 @@ export function load(key, duration) {
       source: data.source ?? '',
       duration,
       clips,
-      audio: { ...DEFAULT_AUDIO, ...(data.audio ?? {}) },
+      audio: { ...defaultAudioSettings(), ...(data.audio ?? {}) },
       markers: Array.isArray(data.markers) ? data.markers : [],
     };
   } catch {

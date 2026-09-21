@@ -255,3 +255,131 @@ html, body {
 .cap-list .cap-ng { color: var(--danger); }
 
 .footer { color: var(--muted); font-size: 0.78rem; text-align: center; padding: 4px 0 0; }
+
+/* 音の仕上げ: トグル5つ */
+.toggles {
+  display: flex;
+  flex-direction: column;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  overflow: hidden;
+}
+
+.toggle-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-height: var(--tap);
+  padding: 10px 12px;
+  border: none;
+  border-top: 1px solid var(--line);
+  background: var(--panel-2);
+  color: var(--text);
+  font-family: inherit;
+  text-align: left;
+  cursor: pointer;
+  touch-action: manipulation;
+  -webkit-tap-highlight-color: transparent;
+}
+
+.toggle-row:first-child { border-top: none; }
+.toggle-row:active { background: #262d3a; }
+.toggle-row:disabled { opacity: 0.45; cursor: default; }
+
+.toggle-text { flex: 1; min-width: 0; }
+
+.toggle-label {
+  display: block;
+  font-size: 0.9rem;
+}
+
+.toggle-value {
+  margin-left: 6px;
+  font-size: 0.8rem;
+  color: var(--accent);
+  font-variant-numeric: tabular-nums;
+}
+
+.toggle-hint {
+  display: block;
+  font-size: 0.75rem;
+  color: var(--muted);
+  margin-top: 2px;
+}
+
+/* スイッチ本体 */
+.toggle-switch {
+  flex: 0 0 auto;
+  position: relative;
+  width: 46px;
+  height: 28px;
+  border-radius: 14px;
+  background: #3a4252;
+  transition: background 0.15s ease;
+}
+
+.toggle-switch::after {
+  content: '';
+  position: absolute;
+  top: 3px;
+  left: 3px;
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  background: #e7ecf5;
+  transition: transform 0.15s ease;
+}
+
+.toggle-row[aria-checked="true"] .toggle-switch { background: var(--accent-dark); }
+.toggle-row[aria-checked="true"] .toggle-switch::after { transform: translateX(18px); }
+
+/* 無音の自動カット */
+.subsection {
+  margin-top: 16px;
+  padding-top: 14px;
+  border-top: 1px solid var(--line);
+}
+
+.subsection-title {
+  margin: 0 0 4px;
+  font-size: 0.9rem;
+  font-weight: 600;
+}
+
+.threshold-row { margin-top: 12px; }
+
+.threshold-label {
+  display: block;
+  font-size: 0.8rem;
+  color: var(--muted);
+  margin-bottom: 6px;
+}
+
+.threshold-buttons {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 6px;
+}
+
+.threshold-buttons .btn {
+  padding: 0 4px;
+  font-size: 0.82rem;
+  min-width: 0;
+  flex-direction: column;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  line-height: 1.25;
+}
+
+.threshold-buttons .btn.is-active { background: var(--accent-dark); border-color: var(--accent); }
+.threshold-buttons .t-hint { font-size: 0.68rem; color: var(--muted); }
+.threshold-buttons .btn.is-active .t-hint { color: #dce8ff; }
+
+.silence-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.silence-actions .btn { flex: 1; }

@@ -4,7 +4,14 @@
  * mp4を開いて、カット・除外・速度変更だけを指定し、WebCodecsで書き出す。
  * 目的は「この端末で本当に書き出せるか」を確かめること。
  */
-import { LevelMeter } from './audio/level-meter.js';
+import { EFFECT_TOGGLES, computeNormalizeGainDb, defaultAudioSettings } from './audio/effects.js';
+import { PreviewAudio } from './audio/preview-audio.js';
+import {
+  DEFAULT_SILENCE_THRESHOLD_DB,
+  SILENCE_THRESHOLDS_DB,
+  describeSilenceCut,
+  detectSoundedRanges,
+} from './audio/silence.js';
 import { WaveformAnalyzer } from './audio/waveform-controller.js';
 import { concatFloat32, getAudioChannelCount } from './audio/waveform.js';
 import { detectCapabilities, describeCapabilities, verdictMessage } from './core/capabilities.js';
@@ -16,6 +23,7 @@ import {
   save,
   setSpeed,
   splitAt,
+  replaceClips,
   storageKey,
   toggleEnabled,
   trimClip,
@@ -63,6 +71,11 @@ const dom = {
   copyCapsBtn: el('copyCapsBtn'),
   levelMeter: el('levelMeter'),
   waveformProgress: el('waveformProgress'),
+  effectToggles: el('effectToggles'),
+  silenceThresholds: el('silenceThresholds'),
+  silenceCutBtn: el('silenceCutBtn'),
+  silenceUndoBtn: el('silenceUndoBtn'),
+  silenceResult: el('silenceResult'),
 };
 
 const state = {
@@ -77,13 +90,16 @@ const state = {
   resultFile: null,
   resultUrl: null,
   waveform: null, // { peaks, rms, sampleRate, bucketFrames }
+  silenceThresholdDb: DEFAULT_SILENCE_THRESHOLD_DB,
+  waveformComplete: false, // 解析が最後まで終わったか（途中のデータで無音カットしないため）
+  silenceUndo: null, // 無音カットの直前の編集リスト
 };
 
 const player = new ClipPlayer(dom.video);
 const timeline = new Timeline(dom.timeline);
 const exporter = new Exporter();
 const waveformAnalyzer = new WaveformAnalyzer();
-const levelMeter = new LevelMeter(dom.video);
+const previewAudio = new PreviewAudio(dom.video);
 const meterView = new MeterView(dom.levelMeter);
 
 // トリムのドラッグ中、DOM更新を1フレームに1回へ間引くための一時置き場。
@@ -98,7 +114,9 @@ let meterRafId = 0;
 async function boot() {
   renderQualityButtons();
   renderSpeedButtons();
+  renderSilenceThresholds();
   renderClips();
+  renderAudioSection();
   wireEvents();
 
   state.capabilities = await detectCapabilities();
@@ -120,7 +138,7 @@ function wireEvents() {
 
   dom.playBtn.addEventListener('click', () => {
     // AudioContextはユーザー操作のハンドラ内でないと始められないため、ここで起動する。
-    levelMeter.start();
+    previewAudio.start();
     player.togglePlay();
   });
   dom.cutBtn.addEventListener('click', cutAtPlayhead);
@@ -129,6 +147,8 @@ function wireEvents() {
   dom.downloadBtn.addEventListener('click', () => state.resultFile && downloadFile(state.resultFile));
   dom.shareBtn.addEventListener('click', onShare);
   dom.copyCapsBtn.addEventListener('click', copyCapabilities);
+  dom.silenceCutBtn.addEventListener('click', applySilenceCut);
+  dom.silenceUndoBtn.addEventListener('click', undoSilenceCut);
 
   timeline.addEventListener('seek', (e) => {
     player.seekSource(e.detail.time);
@@ -171,7 +191,7 @@ function wireEvents() {
 function startMeterLoop() {
   if (meterRafId) return;
   const loop = () => {
-    meterView.setLevels(levelMeter.read());
+    meterView.setLevels(previewAudio.read());
     meterRafId = requestAnimationFrame(loop);
   };
   meterRafId = requestAnimationFrame(loop);
@@ -187,6 +207,8 @@ function stopMeterLoop() {
 
 async function analyzeWaveformFor(file) {
   state.waveform = { peaks: new Float32Array(0), rms: new Float32Array(0), sampleRate: 0, bucketFrames: 0 };
+  state.waveformComplete = false;
+  renderAudioSection();
   dom.waveformProgress.hidden = false;
   dom.waveformProgress.textContent = '波形を解析中…';
 
@@ -219,6 +241,9 @@ async function analyzeWaveformFor(file) {
       return;
     }
     dom.waveformProgress.hidden = true;
+    // 解析が出そろったので「音量をそろえる」の補正量を計算し直し、無音カットを解禁する。
+    state.waveformComplete = true;
+    commit(state.editList);
   } catch (err) {
     if (state.file !== file) return;
     dom.waveformProgress.textContent = `波形の解析に失敗しました: ${err?.message ?? err}`;
@@ -258,7 +283,10 @@ async function openFile(file) {
   dom.cutBtn.disabled = false;
   player.seekSource(state.editList.clips[0].in);
 
+  setSilenceUndo(null);
+  dom.silenceResult.textContent = '';
   renderClips();
+  renderAudioSection();
   updateExportAvailability();
   onPlayerTimeUpdate();
 
@@ -282,15 +310,28 @@ function waitForDuration(video) {
 
 /* ---- 編集操作 ------------------------------------------------------------ */
 
-function commit(nextList, { selectId } = {}) {
-  state.editList = nextList;
+function commit(nextList, { selectId, keepUndo = false } = {}) {
+  // クリップが変わると「音量をそろえる」の補正量も変わるので、都度計算し直す。
+  const withGain = withNormalizeGain(nextList);
+  state.editList = withGain;
   if (selectId) state.selectedClipId = selectId;
-  player.setEditList(nextList);
-  timeline.setEditList(nextList);
+  if (!keepUndo) setSilenceUndo(null);
+
+  player.setEditList(withGain);
+  timeline.setEditList(withGain);
   timeline.setSelected(state.selectedClipId);
+  timeline.setWaveform(state.waveform);
   renderClips();
+  renderAudioSection();
   updateExportAvailability();
-  if (state.storageKey) save(nextList, state.storageKey);
+  if (state.storageKey) save(withGain, state.storageKey);
+}
+
+/** 波形が分かっていれば、「音量をそろえる」の補正量を計算して埋め込む。 */
+function withNormalizeGain(list) {
+  const normalizeGainDb = computeNormalizeGainDb(state.waveform, list.clips);
+  if (normalizeGainDb === list.audio.normalizeGainDb) return list;
+  return { ...list, audio: { ...list.audio, normalizeGainDb } };
 }
 
 function cutAtPlayhead() {
@@ -462,6 +503,125 @@ async function copyCapabilities() {
   setTimeout(() => {
     dom.copyCapsBtn.textContent = '結果をコピー';
   }, 2000);
+}
+
+/* ---- 音の仕上げ ------------------------------------------------------------ */
+
+/** 5つのトグルと無音カットの表示をまとめて更新する。 */
+function renderAudioSection() {
+  const audio = state.editList?.audio ?? null;
+  // 動画を開く前は、まだ触れないが「開いたらこうなる」初期値を見せる
+  // （全部OFFに見せると、実際の初期状態と食い違って紛らわしい）。
+  const shown = audio ?? defaultAudioSettings();
+
+  dom.effectToggles.replaceChildren();
+  for (const toggle of EFFECT_TOGGLES) {
+    const on = toggle.get(shown);
+
+    const row = document.createElement('button');
+    row.type = 'button';
+    row.className = 'toggle-row';
+    row.setAttribute('role', 'switch');
+    row.setAttribute('aria-checked', String(Boolean(on)));
+    row.disabled = !audio;
+
+    const text = document.createElement('span');
+    text.className = 'toggle-text';
+
+    const label = document.createElement('span');
+    label.className = 'toggle-label';
+    label.textContent = toggle.label;
+    // 「音量をそろえる」だけは、実際に何dB動かすのかを見せる。
+    if (toggle.id === 'normalize' && audio && on && audio.normalizeGainDb !== 0) {
+      const value = document.createElement('span');
+      value.className = 'toggle-value';
+      const sign = audio.normalizeGainDb > 0 ? '+' : '';
+      value.textContent = `${sign}${audio.normalizeGainDb.toFixed(1)}dB`;
+      label.append(value);
+    }
+
+    const hint = document.createElement('span');
+    hint.className = 'toggle-hint';
+    hint.textContent = toggle.hint;
+
+    const knob = document.createElement('span');
+    knob.className = 'toggle-switch';
+
+    text.append(label, hint);
+    row.append(text, knob);
+    row.addEventListener('click', () => onEffectToggle(toggle));
+    dom.effectToggles.append(row);
+  }
+
+  if (audio) previewAudio.setSettings(audio);
+
+  dom.silenceCutBtn.disabled = !state.waveformComplete;
+  dom.silenceUndoBtn.hidden = state.silenceUndo === null;
+}
+
+function onEffectToggle(toggle) {
+  if (!state.editList) return;
+  const audio = state.editList.audio;
+  const next = toggle.set(audio, !toggle.get(audio));
+  commit({ ...state.editList, audio: next });
+}
+
+function renderSilenceThresholds() {
+  dom.silenceThresholds.replaceChildren();
+  // 数字だけだと意味が分からないので、どういう音を無音とみなすかを添える。
+  const hints = { '-50': '静かな部屋', '-45': 'ふつう', '-38': '雑音が多い' };
+  for (const db of SILENCE_THRESHOLDS_DB) {
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'btn';
+    btn.setAttribute('role', 'radio');
+    const active = db === state.silenceThresholdDb;
+    btn.classList.toggle('is-active', active);
+    btn.setAttribute('aria-checked', String(active));
+
+    const value = document.createElement('span');
+    value.textContent = `${db}dB`;
+    const hint = document.createElement('span');
+    hint.className = 't-hint';
+    hint.textContent = hints[String(db)] ?? '';
+    btn.append(value, hint);
+
+    btn.addEventListener('click', () => {
+      state.silenceThresholdDb = db;
+      renderSilenceThresholds();
+    });
+    dom.silenceThresholds.append(btn);
+  }
+}
+
+function applySilenceCut() {
+  if (!state.editList || !state.waveformComplete) return;
+
+  const ranges = detectSoundedRanges(state.waveform, {
+    duration: state.editList.duration,
+    thresholdDb: state.silenceThresholdDb,
+  });
+  dom.silenceResult.textContent = describeSilenceCut(ranges, state.editList.duration);
+  if (ranges.length === 0) return;
+
+  const before = state.editList;
+  const next = replaceClips(state.editList, ranges);
+  setSilenceUndo(before);
+  commit(next, { selectId: next.clips[0].id, keepUndo: true });
+  player.seekSource(next.clips[0].in);
+}
+
+function undoSilenceCut() {
+  if (!state.silenceUndo) return;
+  const restored = state.silenceUndo;
+  setSilenceUndo(null);
+  dom.silenceResult.textContent = '';
+  commit(restored, { selectId: restored.clips[0].id });
+}
+
+function setSilenceUndo(list) {
+  state.silenceUndo = list;
+  dom.silenceUndoBtn.hidden = list === null;
 }
 
 /* ---- 書き出し ------------------------------------------------------------ */

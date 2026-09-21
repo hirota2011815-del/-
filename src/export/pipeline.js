@@ -22,6 +22,7 @@ import {
   VideoSampleSink,
   VideoSampleSource,
 } from '../../vendor/mediabunny.min.mjs';
+import { createEffectChain, defaultAudioSettings, hasAnyEffect } from '../audio/effects.js';
 import { AUDIO_CODEC, VIDEO_CODEC } from '../core/codecs.js';
 import { enabledClips, outputDuration } from '../core/edit-list.js';
 import { LinearResampler } from './resampler.js';
@@ -64,6 +65,7 @@ export async function runExport({
   if (clips.length === 0) throw new Error('書き出すクリップがありません。除外を解除してください。');
 
   const totalOut = outputDuration(editList);
+  const audioSettings = { ...defaultAudioSettings(), ...(editList.audio ?? {}) };
   const checkCanceled = () => {
     if (isCanceled()) throw new ExportCanceled();
   };
@@ -128,6 +130,21 @@ export async function runExport({
 
     const videoSink = new VideoSampleSink(videoTrack);
     const audioSink = audioUsable ? new AudioSampleSink(audioTrack) : null;
+    const audioWriter = audioSink
+      ? new AudioOutputWriter({
+          audioSource,
+          channels: audioChannels,
+          sampleRate: audioSampleRate,
+          effectChain: hasAnyEffect(audioSettings)
+            ? createEffectChain({
+                sampleRate: audioSampleRate,
+                channels: audioChannels,
+                audio: audioSettings,
+                totalDurationSec: totalOut,
+              })
+            : null,
+        })
+      : null;
 
     let cursor = 0; // 出力タイムライン上の現在位置（秒）
     for (let i = 0; i < clips.length; i += 1) {
@@ -140,15 +157,13 @@ export async function runExport({
         videoSink, videoSource, clip, cursor, totalOut, onProgress, checkCanceled, detail,
       });
 
-      if (audioSink) {
-        await writeClipAudio({
-          audioSink, audioSource, clip, cursor, channels: audioChannels,
-          sampleRate: audioSampleRate, checkCanceled,
-        });
+      if (audioSink && audioWriter) {
+        await audioWriter.writeClip({ audioSink, clip, cursor, checkCanceled });
       }
 
       cursor += clipOutDuration;
     }
+    await audioWriter?.flush();
 
     onProgress({ phase: 'finalize', ratio: 0.99, detail: 'mp4にまとめています' });
     await output.finalize();
@@ -216,50 +231,86 @@ async function writeClipVideo({ videoSink, videoSource, clip, cursor, totalOut, 
  * 「タイムスタンプを音声基準で振り直す」）。クリップの頭では名目の位置へ吸着させ、
  * クリップをまたぐ誤差が溜まらないようにする。
  */
-async function writeClipAudio({ audioSink, audioSource, clip, cursor, channels, sampleRate, checkCanceled }) {
-  const resampler = new LinearResampler(channels, clip.speed);
+class AudioOutputWriter {
+  /**
+   * @param {object} p
+   * @param {import('../../vendor/mediabunny.min.mjs').AudioSampleSource} p.audioSource
+   * @param {number} p.channels
+   * @param {number} p.sampleRate
+   * @param {ReturnType<typeof createEffectChain> | null} p.effectChain
+   */
+  constructor({ audioSource, channels, sampleRate, effectChain }) {
+    this.audioSource = audioSource;
+    this.channels = channels;
+    this.sampleRate = sampleRate;
+    this.effectChain = effectChain;
+    /** 出力タイムライン上の、次に書き込むフレーム位置。 */
+    this.frameCursor = 0;
+    /** @type {Float32Array[]} まだ書き出していない端数 */
+    this.buffered = Array.from({ length: channels }, () => new Float32Array(0));
+  }
 
-  let frameCursor = Math.round(cursor * sampleRate);
-  /** @type {Float32Array[]} 出力待ちのバッファ */
-  let buffered = Array.from({ length: channels }, () => new Float32Array(0));
+  /** 1クリップぶんを読み、速度ぶんリサンプルして書き込む。 */
+  async writeClip({ audioSink, clip, cursor, checkCanceled }) {
+    const resampler = new LinearResampler(this.channels, clip.speed);
+    // クリップの頭で名目の位置へ吸着させ、クリップをまたぐ誤差が溜まらないようにする。
+    this.frameCursor = Math.round(cursor * this.sampleRate);
 
-  const emit = async (planes, force) => {
-    buffered = planes.map((plane, ch) => concat(buffered[ch], plane));
-    while (buffered[0].length >= (force ? 1 : AUDIO_CHUNK_FRAMES)) {
-      const take = Math.min(AUDIO_CHUNK_FRAMES, buffered[0].length);
-      const interleavedPlanar = new Float32Array(take * channels);
-      for (let ch = 0; ch < channels; ch += 1) {
-        interleavedPlanar.set(buffered[ch].subarray(0, take), ch * take);
-        buffered[ch] = buffered[ch].slice(take);
+    for await (const sample of audioSink.samples(clip.in, clip.out)) {
+      try {
+        checkCanceled();
+        const planes = extractPlanes(sample, this.channels);
+        const trimmed = trimToRange(planes, sample, clip, this.sampleRate);
+        if (trimmed[0].length === 0) continue;
+        await this.#push(resampler.push(trimmed), false);
+      } finally {
+        sample.close();
+      }
+    }
+    await this.#push(resampler.flush(), false);
+  }
+
+  /** 最後に残った端数を書き出す。 */
+  async flush() {
+    await this.#push(
+      Array.from({ length: this.channels }, () => new Float32Array(0)),
+      true,
+    );
+  }
+
+  async #push(planes, force) {
+    this.buffered = planes.map((plane, ch) => concat(this.buffered[ch], plane));
+    while (this.buffered[0].length >= (force ? 1 : AUDIO_CHUNK_FRAMES)) {
+      const take = Math.min(AUDIO_CHUNK_FRAMES, this.buffered[0].length);
+
+      // エフェクトは「速度変更まで済ませた出力タイムライン」に対してかける。
+      // フィルターやコンプレッサーは状態を持つので、鎖はクリップをまたいで1本。
+      const block = [];
+      for (let ch = 0; ch < this.channels; ch += 1) {
+        block.push(this.buffered[ch].slice(0, take));
+        this.buffered[ch] = this.buffered[ch].slice(take);
+      }
+      this.effectChain?.process(block, this.frameCursor);
+
+      const interleavedPlanar = new Float32Array(take * this.channels);
+      for (let ch = 0; ch < this.channels; ch += 1) {
+        interleavedPlanar.set(block[ch], ch * take);
       }
       const audioSample = new AudioSample({
         data: interleavedPlanar,
         format: 'f32-planar',
-        numberOfChannels: channels,
-        sampleRate,
-        timestamp: frameCursor / sampleRate,
+        numberOfChannels: this.channels,
+        sampleRate: this.sampleRate,
+        timestamp: this.frameCursor / this.sampleRate,
       });
-      frameCursor += take;
+      this.frameCursor += take;
       try {
-        await audioSource.add(audioSample);
+        await this.audioSource.add(audioSample);
       } finally {
         audioSample.close();
       }
     }
-  };
-
-  for await (const sample of audioSink.samples(clip.in, clip.out)) {
-    try {
-      checkCanceled();
-      const planes = extractPlanes(sample, channels);
-      const trimmed = trimToRange(planes, sample, clip, sampleRate);
-      if (trimmed[0].length === 0) continue;
-      await emit(resampler.push(trimmed), false);
-    } finally {
-      sample.close();
-    }
   }
-  await emit(resampler.flush(), true);
 }
 
 /** AudioSample からチャンネルごとの Float32Array を取り出す。 */

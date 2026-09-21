@@ -31,6 +31,25 @@ import {
   loudnessHint,
 } from '../src/audio/dbscale.js';
 import { concatFloat32 } from '../src/audio/waveform.js';
+import {
+  Biquad,
+  Compressor,
+  FadeEnvelope,
+  Gain,
+  dbToGain,
+  gainToDb,
+  highpassCoefficients,
+  peakingCoefficients,
+} from '../src/audio/dsp.js';
+import {
+  EFFECT_PARAMS,
+  computeNormalizeGainDb,
+  createEffectChain,
+  defaultAudioSettings,
+  hasAnyEffect,
+} from '../src/audio/effects.js';
+import { detectSoundedRanges } from '../src/audio/silence.js';
+import { replaceClips } from '../src/core/edit-list.js';
 
 let passed = 0;
 let failed = 0;
@@ -138,7 +157,11 @@ test('保存形式が仕様どおりの形になる', () => {
   assert.equal(json.source, 'IMG_0431.mp4');
   assert.deepEqual(Object.keys(json.clips[0]).sort(), ['enabled', 'filter', 'id', 'in', 'out', 'speed']);
   assert.equal(json.clips[0].filter, null);
-  assert.deepEqual(Object.keys(json.audio).sort(), ['highpassHz', 'limiterDb', 'normalizeGainDb']);
+  // 仕様の3つはそのまま残し、どのトグルがONかを表すフラグを足してある。
+  assert.deepEqual(
+    Object.keys(json.audio).sort(),
+    ['clarity', 'fade', 'highpassHz', 'limiterDb', 'normalize', 'normalizeGainDb'],
+  );
   assert.deepEqual(json.markers, []);
 });
 
@@ -351,6 +374,260 @@ test('片方が空でもそのまま返る（無駄なコピーをしない）',
   const empty = new Float32Array(0);
   assert.equal(concatFloat32(a, empty), a);
   assert.equal(concatFloat32(empty, a), a);
+});
+
+
+console.log('\n音声エフェクトのDSP');
+
+/** 指定した周波数のサイン波を作る。 */
+function sine(freqHz, sampleRate, frames, amplitude = 1) {
+  const data = new Float32Array(frames);
+  for (let i = 0; i < frames; i += 1) {
+    data[i] = Math.sin((2 * Math.PI * freqHz * i) / sampleRate) * amplitude;
+  }
+  return data;
+}
+
+/** 後半（フィルターが落ち着いてから）のピークを測る。 */
+function settledPeak(data) {
+  let peak = 0;
+  for (let i = Math.floor(data.length / 2); i < data.length; i += 1) {
+    const abs = Math.abs(data[i]);
+    if (abs > peak) peak = abs;
+  }
+  return peak;
+}
+
+test('dBと倍率を往復できる', () => {
+  assert.ok(Math.abs(dbToGain(0) - 1) < 1e-12);
+  assert.ok(Math.abs(dbToGain(-6) - 0.5012) < 1e-3);
+  assert.ok(Math.abs(gainToDb(dbToGain(-12)) - -12) < 1e-9);
+});
+
+test('ハイパスは低い音を削り、高い音はそのまま通す', () => {
+  const sampleRate = 48000;
+  const coeffs = highpassCoefficients(110, sampleRate);
+
+  const low = [sine(40, sampleRate, 4800)];
+  new Biquad(coeffs, 1).process(low);
+  assert.ok(settledPeak(low[0]) < 0.3, `40Hzが削れていない: ${settledPeak(low[0])}`);
+
+  const high = [sine(1000, sampleRate, 4800)];
+  new Biquad(coeffs, 1).process(high);
+  assert.ok(settledPeak(high[0]) > 0.95, `1kHzが減っている: ${settledPeak(high[0])}`);
+});
+
+test('ピーキングEQは狙った高さだけを持ち上げる', () => {
+  const sampleRate = 48000;
+  const coeffs = peakingCoefficients(3000, sampleRate, 1, 3.5);
+
+  const target = [sine(3000, sampleRate, 9600, 0.5)];
+  new Biquad(coeffs, 1).process(target);
+  const boostedDb = gainToDb(settledPeak(target[0]) / 0.5);
+  assert.ok(Math.abs(boostedDb - 3.5) < 0.4, `3kHzの持ち上がりが ${boostedDb.toFixed(2)}dB`);
+
+  const far = [sine(200, sampleRate, 9600, 0.5)];
+  new Biquad(coeffs, 1).process(far);
+  assert.ok(Math.abs(gainToDb(settledPeak(far[0]) / 0.5)) < 1, '離れた高さまで変わっている');
+});
+
+test('ハイパスはチャンネルごとに独立して効く', () => {
+  const sampleRate = 48000;
+  const planes = [sine(1000, sampleRate, 2400), new Float32Array(2400)];
+  new Biquad(highpassCoefficients(110, sampleRate), 2).process(planes);
+  assert.ok(planes[1].every((v) => v === 0), '無音のチャンネルに音が漏れている');
+});
+
+test('コンプレッサーはしきい値を超えた音だけ下げる', () => {
+  const sampleRate = 48000;
+  const loud = [sine(440, sampleRate, 48000, 0.9)]; // -0.9dB、しきい値-26dBを大きく超える
+  new Compressor({ sampleRate, thresholdDb: -26, ratio: 3 }).process(loud);
+  assert.ok(settledPeak(loud[0]) < 0.35, `圧縮されていない: ${settledPeak(loud[0])}`);
+
+  const quiet = [sine(440, sampleRate, 48000, 0.01)]; // -40dB、しきい値より下
+  new Compressor({ sampleRate, thresholdDb: -26, ratio: 3 }).process(quiet);
+  assert.ok(settledPeak(quiet[0]) > 0.009, `小さい音まで下げている: ${settledPeak(quiet[0])}`);
+});
+
+test('リミッターは上限を大きく超えさせない', () => {
+  const sampleRate = 48000;
+  const planes = [sine(440, sampleRate, 48000, 1.0)];
+  new Compressor({ sampleRate, ...EFFECT_PARAMS.limiter }).process(planes);
+  const peakDb = gainToDb(settledPeak(planes[0]));
+  assert.ok(peakDb < EFFECT_PARAMS.limiter.thresholdDb + 1, `上限を超えている: ${peakDb.toFixed(2)}dB`);
+});
+
+test('左右は連動して圧縮され、定位がずれない', () => {
+  const sampleRate = 48000;
+  const left = sine(440, sampleRate, 24000, 0.9);
+  const right = Float32Array.from(left);
+  new Compressor({ sampleRate, thresholdDb: -26, ratio: 3 }).process([left, right]);
+  for (let i = 0; i < left.length; i += 1) {
+    assert.ok(Math.abs(left[i] - right[i]) < 1e-9, `${i} 番目で左右がずれた`);
+  }
+});
+
+test('ゲインは指定したdBぶん増減する', () => {
+  const planes = [Float32Array.from([0.5, -0.5])];
+  new Gain(6).process(planes);
+  assert.ok(Math.abs(planes[0][0] - 0.5 * dbToGain(6)) < 1e-6);
+});
+
+test('フェードは先頭と末尾だけを絞り、真ん中は触らない', () => {
+  const sampleRate = 100;
+  const totalFrames = 1000;
+  const fade = new FadeEnvelope({ sampleRate, totalFrames, fadeInSec: 0.5, fadeOutSec: 0.6 });
+
+  const head = [new Float32Array(50).fill(1)];
+  fade.process(head, 0);
+  assert.equal(head[0][0], 0, '先頭が0から始まっていない');
+  assert.ok(head[0][49] > head[0][0], '先頭で上がっていない');
+
+  const middle = [new Float32Array(50).fill(1)];
+  fade.process(middle, 400);
+  assert.ok(middle[0].every((v) => v === 1), '真ん中まで絞っている');
+
+  const tail = [new Float32Array(50).fill(1)];
+  fade.process(tail, totalFrames - 50);
+  assert.ok(tail[0][49] < 0.05, `末尾が絞れていない: ${tail[0][49]}`);
+});
+
+test('フェードはブロックに分けても位置がずれない', () => {
+  const sampleRate = 100;
+  const fade = new FadeEnvelope({ sampleRate, totalFrames: 1000, fadeInSec: 0.5, fadeOutSec: 0.6 });
+  const whole = [new Float32Array(50).fill(1)];
+  fade.process(whole, 0);
+
+  const split = [new Float32Array(50).fill(1)];
+  const first = [split[0].subarray(0, 20)];
+  const second = [split[0].subarray(20)];
+  fade.process(first, 0);
+  fade.process(second, 20);
+  for (let i = 0; i < 50; i += 1) {
+    assert.ok(Math.abs(whole[0][i] - split[0][i]) < 1e-9, `${i} 番目がずれた`);
+  }
+});
+
+console.log('\n音の仕上げの設定');
+
+test('初期状態は仕様どおり（ノイズを減らすだけOFF）', () => {
+  const audio = defaultAudioSettings();
+  assert.equal(audio.normalize, true);
+  assert.equal(audio.clarity, true);
+  assert.equal(audio.highpassHz, 0, 'ノイズ低減が初期ONになっている');
+  assert.equal(audio.limiterDb, -1.5);
+  assert.equal(audio.fade, true);
+});
+
+test('全部OFFならエフェクト処理ごと省ける', () => {
+  const audio = { normalize: false, normalizeGainDb: 0, clarity: false, highpassHz: 0, limiterDb: null, fade: false };
+  assert.equal(hasAnyEffect(audio), false);
+  assert.equal(hasAnyEffect(defaultAudioSettings()), true);
+});
+
+test('音量をそろえる補正量は、ピークが-3dBになる値', () => {
+  // 振幅0.1（約-20dB）のバケットだけ → +17dBで-3dBに届く
+  const waveform = {
+    peaks: Float32Array.from([0.1, 0.1]),
+    rms: Float32Array.from([0.07, 0.07]),
+    sampleRate: 10,
+    bucketFrames: 10,
+  };
+  const gain = computeNormalizeGainDb(waveform, [{ in: 0, out: 2, enabled: true }]);
+  assert.ok(Math.abs(gain - 17) < 0.2, `${gain}dB`);
+});
+
+test('補正量は除外していないクリップの範囲だけで決まる', () => {
+  const waveform = {
+    peaks: Float32Array.from([0.9, 0.9, 0.05, 0.05]), // 前半が大きい
+    rms: Float32Array.from([0.6, 0.6, 0.03, 0.03]),
+    sampleRate: 10,
+    bucketFrames: 10,
+  };
+  const onlyQuiet = computeNormalizeGainDb(waveform, [
+    { in: 0, out: 2, enabled: false },
+    { in: 2, out: 4, enabled: true },
+  ]);
+  assert.ok(onlyQuiet > 10, `除外したはずの大きい部分を見ている: ${onlyQuiet}dB`);
+});
+
+test('波形が無ければ補正量は0', () => {
+  assert.equal(computeNormalizeGainDb(null, [{ in: 0, out: 1, enabled: true }]), 0);
+});
+
+test('エフェクト鎖はゲインを先に通す（リミッターを最終段にするため）', () => {
+  const sampleRate = 48000;
+  const audio = { ...defaultAudioSettings(), normalizeGainDb: 12, clarity: false, fade: false };
+  const chain = createEffectChain({ sampleRate, channels: 1, audio, totalDurationSec: 1 });
+  const planes = [sine(440, sampleRate, 48000, 0.5)];
+  chain.process(planes, 0);
+  // +12dBしてもリミッターが最後に効くので、上限をほとんど超えない
+  const peakDb = gainToDb(settledPeak(planes[0]));
+  assert.ok(peakDb < EFFECT_PARAMS.limiter.thresholdDb + 1, `上限を超えた: ${peakDb.toFixed(2)}dB`);
+});
+
+console.log('\n無音の自動カット');
+
+/** 秒ごとの振幅からバケット配列を作る（1バケット=0.1秒）。 */
+function waveformFromSeconds(amplitudesPerTenth) {
+  return {
+    peaks: Float32Array.from(amplitudesPerTenth),
+    rms: Float32Array.from(amplitudesPerTenth),
+    sampleRate: 10,
+    bucketFrames: 1, // 1バケット = 0.1秒
+  };
+}
+
+test('しきい値を一定時間下回る区間を「間」として外す', () => {
+  // 0.0-1.0秒: 音あり / 1.0-2.0秒: 無音 / 2.0-3.0秒: 音あり
+  const amp = [...Array(10).fill(0.5), ...Array(10).fill(0.0001), ...Array(10).fill(0.5)];
+  const ranges = detectSoundedRanges(waveformFromSeconds(amp), {
+    duration: 3,
+    thresholdDb: -45,
+    padSec: 0,
+  });
+  assert.equal(ranges.length, 2, JSON.stringify(ranges));
+  assert.ok(Math.abs(ranges[0].out - 1.0) < 0.15, `${ranges[0].out}`);
+  assert.ok(Math.abs(ranges[1].in - 2.0) < 0.15, `${ranges[1].in}`);
+});
+
+test('短い無音は「間」とみなさない（0.6秒未満は切らない）', () => {
+  // 真ん中の無音は0.3秒だけ
+  const amp = [...Array(10).fill(0.5), ...Array(3).fill(0.0001), ...Array(10).fill(0.5)];
+  const ranges = detectSoundedRanges(waveformFromSeconds(amp), { duration: 2.3, thresholdDb: -45 });
+  assert.equal(ranges.length, 1, '短い間まで切っている');
+});
+
+test('前後に余白を残すので語尾が切れない', () => {
+  const amp = [...Array(10).fill(0.5), ...Array(10).fill(0.0001), ...Array(10).fill(0.5)];
+  const noPad = detectSoundedRanges(waveformFromSeconds(amp), { duration: 3, thresholdDb: -45, padSec: 0 });
+  const padded = detectSoundedRanges(waveformFromSeconds(amp), { duration: 3, thresholdDb: -45, padSec: 0.12 });
+  assert.ok(padded[0].out > noPad[0].out, '余白が足されていない');
+  assert.ok(Math.abs(padded[0].out - noPad[0].out - 0.12) < 1e-6);
+});
+
+test('しきい値を上げるほど多くを無音とみなす', () => {
+  // -42dB相当（0.008）の小さい音が真ん中に1秒
+  const amp = [...Array(10).fill(0.5), ...Array(10).fill(0.008), ...Array(10).fill(0.5)];
+  const loose = detectSoundedRanges(waveformFromSeconds(amp), { duration: 3, thresholdDb: -50, padSec: 0 });
+  const strict = detectSoundedRanges(waveformFromSeconds(amp), { duration: 3, thresholdDb: -38, padSec: 0 });
+  assert.equal(loose.length, 1, '-50dBでは小さい音も残るはず');
+  assert.equal(strict.length, 2, '-38dBでは小さい音を間とみなすはず');
+});
+
+test('全部無音なら区間は返らない', () => {
+  const ranges = detectSoundedRanges(waveformFromSeconds(Array(30).fill(0)), { duration: 3 });
+  assert.equal(ranges.length, 0);
+});
+
+test('検出した区間からクリップを作り直せる', () => {
+  const list = createEditList('a.mp4', 3);
+  const next = replaceClips(list, [{ in: 0, out: 1 }, { in: 2, out: 3 }]);
+  assert.equal(next.clips.length, 2);
+  assert.deepEqual([next.clips[0].in, next.clips[0].out], [0, 1]);
+  assert.equal(next.clips[1].speed, 1);
+  assert.equal(next.clips[1].enabled, true);
+  assert.equal(list.clips.length, 1, '元のリストが書き換えられている');
 });
 
 console.log(`\n${passed} 件通過 / ${failed} 件失敗`);

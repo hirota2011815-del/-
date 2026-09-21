@@ -56,6 +56,26 @@
     </div>
   </section>
 
+  <!-- 5. 音の仕上げ -->
+  <section class="panel">
+    <h2 class="panel-title">音の仕上げ</h2>
+    <div id="effectToggles" class="toggles"></div>
+
+    <div class="subsection">
+      <h3 class="subsection-title">無音の自動カット</h3>
+      <p class="muted">しゃべっていない「間」を外して、音が入っているところだけに切り分けます。</p>
+      <div class="threshold-row">
+        <span class="threshold-label">どこから無音とみなすか</span>
+        <div id="silenceThresholds" class="threshold-buttons" role="radiogroup" aria-label="無音のしきい値"></div>
+      </div>
+      <div class="silence-actions">
+        <button id="silenceCutBtn" class="btn" type="button" disabled>無音をカット</button>
+        <button id="silenceUndoBtn" class="btn" type="button" hidden>元に戻す</button>
+      </div>
+      <p id="silenceResult" class="muted"></p>
+    </div>
+  </section>
+
   <!-- 8. 書き出し -->
   <section class="panel">
     <h2 class="panel-title">書き出し</h2>

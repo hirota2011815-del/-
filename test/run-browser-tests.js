@@ -59,6 +59,16 @@ try {
     if (!r.pass) failed += 1;
   }
 
+  /* --- 1.7. 音の仕上げが書き出しに効いているか --- */
+  await page.waitForFunction(() => typeof window.__runAudioEffectsSuite === 'function');
+  const effectResults = await page.evaluate(() => window.__runAudioEffectsSuite());
+
+  console.log('\n音の仕上げ');
+  for (const r of effectResults) {
+    console.log(`  ${r.pass ? 'PASS' : 'FAIL'}  ${r.name}${r.detail ? `  (${r.detail})` : ''}`);
+    if (!r.pass) failed += 1;
+  }
+
   /* --- 2. 画面が組み上がるか --- */
   console.log('\n画面');
   const errors = [];
@@ -79,6 +89,12 @@ try {
     timelineHeight: document.getElementById('timeline').height,
     hasLevelMeter: document.getElementById('levelMeter') !== null,
     meterWidth: document.getElementById('levelMeter').getBoundingClientRect().width,
+    toggles: [...document.querySelectorAll('#effectToggles .toggle-row')].map((b) => ({
+      label: b.querySelector('.toggle-label').textContent,
+      on: b.getAttribute('aria-checked') === 'true',
+    })),
+    thresholds: [...document.querySelectorAll('#silenceThresholds .btn')].map((b) => b.textContent),
+    silenceDisabled: document.getElementById('silenceCutBtn').disabled,
   }));
 
   const uiChecks = [
@@ -90,6 +106,14 @@ try {
     ['dBグリッド分の高さが確保されている', ui.timelineHeight >= 100, `${ui.timelineHeight}`],
     ['レベルメーターの要素がある', ui.hasLevelMeter],
     ['レベルメーターがプレビューの横に並んでいる', ui.meterWidth > 0, `${ui.meterWidth}`],
+    ['音の仕上げのトグルが5つ', ui.toggles.length === 5, ui.toggles.map((t) => t.label).join(',')],
+    [
+      '初期ONは4つ（ノイズを減らすだけOFF）',
+      ui.toggles.filter((t) => t.on).length === 4 && ui.toggles.find((t) => t.label.startsWith('ノイズ'))?.on === false,
+      ui.toggles.map((t) => `${t.label}:${t.on ? 'ON' : 'OFF'}`).join(' '),
+    ],
+    ['無音のしきい値が3択', ui.thresholds.length === 3, ui.thresholds.join(',')],
+    ['波形の解析前は無音カットを押せない', ui.silenceDisabled === true],
     ['JSエラーが出ない', errors.length === 0, errors.join(' | ')],
   ];
   for (const [name, pass, detail] of uiChecks) {
