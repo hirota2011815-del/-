@@ -13,6 +13,7 @@ import {
   VideoSampleSink,
 } from '../vendor/mediabunny.min.mjs';
 import { runExport } from '../src/export/pipeline.js';
+import { serialEncoding } from '../src/export/serial-encoder.js';
 import { outputDuration } from '../src/core/edit-list.js';
 import { FIXTURE, buildFixture, colorToSecond } from './fixture.js';
 
@@ -175,6 +176,48 @@ export async function runSuite() {
         if (timestamps[i] < timestamps[i - 1]) backwards += 1;
       }
       check('出力フレームの時刻が巻き戻らない', backwards === 0, `巻き戻り ${backwards}回 / ${timestamps.length}フレーム`);
+    }
+  }
+
+  /*
+   * 逃げ道のエンコーダ（1フレームずつ出し切って並べ替えを封じるもの）。
+   * 実機で並べ替えに当たったときだけ使われる経路なので、
+   * ここでは「有効にしてもちゃんとmp4になる」ことを確かめておく。
+   */
+  {
+    serialEncoding.enabled = true;
+    let serialResult = null;
+    let serialError = null;
+    try {
+      serialResult = await runExport({
+        file: source,
+        editList: { ...editList, clips: [{ id: 'one', in: 1, out: 5, speed: 1, enabled: true, filter: null }] },
+        quality: 'standard',
+        codecs: TEST_CODECS,
+      });
+    } catch (err) {
+      serialError = err?.message ?? String(err);
+    } finally {
+      serialEncoding.enabled = false;
+    }
+
+    check('逃げ道のエンコーダでも書き出せる', serialError === null, serialError ?? '');
+    if (serialResult) {
+      check(
+        '逃げ道でもフレームが落ちない',
+        serialResult.framesSubmitted === serialResult.packetsEncoded,
+        `投入 ${serialResult.framesSubmitted} / 出力 ${serialResult.packetsEncoded}`,
+      );
+      const serialStamps = await frameTimestamps(new File([serialResult.buffer], 'serial.mp4'));
+      let serialBackwards = 0;
+      for (let i = 1; i < serialStamps.length; i += 1) {
+        if (serialStamps[i] < serialStamps[i - 1]) serialBackwards += 1;
+      }
+      check(
+        '逃げ道の出力も時刻が巻き戻らない',
+        serialBackwards === 0 && serialStamps.length > 0,
+        `巻き戻り ${serialBackwards}回 / ${serialStamps.length}フレーム`,
+      );
     }
   }
 

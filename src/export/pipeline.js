@@ -27,6 +27,7 @@ import { AUDIO_CODEC, VIDEO_CODEC } from '../core/codecs.js';
 import { enabledClips, outputDuration } from '../core/edit-list.js';
 import { LinearResampler } from './resampler.js';
 import { audioBitrate, videoBitrate } from './quality.js';
+import { isTimestampOrderError, serialEncoding } from './serial-encoder.js';
 
 /** 一度に書き出す音声のかたまり（フレーム数）。小さいほど反応がよく、大きいほど速い。 */
 const AUDIO_CHUNK_FRAMES = 2048;
@@ -56,7 +57,24 @@ export class ExportCanceled extends Error {
  * @returns {Promise<{buffer: ArrayBuffer, mimeType: string, durationSec: number, hasAudio: boolean,
  *   width: number, height: number, videoEncoderConfig: object|null, audioEncoderConfig: object|null}>}
  */
-export async function runExport({
+export async function runExport(params) {
+  try {
+    return await encodeOnce(params);
+  } catch (err) {
+    // フレームの並べ替えで詰まった場合だけ、並べ替えの起きないやり方で1度だけやり直す。
+    if (!isTimestampOrderError(err) || serialEncoding.enabled) throw err;
+    params.onProgress?.({ phase: 'prepare', ratio: 0, detail: '並べ替えを避けてやり直しています' });
+    serialEncoding.enabled = true;
+    try {
+      const result = await encodeOnce(params);
+      return { ...result, usedSerialEncoder: true };
+    } finally {
+      serialEncoding.enabled = false;
+    }
+  }
+}
+
+async function encodeOnce({
   file,
   editList,
   quality,
@@ -234,6 +252,7 @@ async function writeClipVideo({
   videoSink, videoSource, clip, cursor, totalOut, onProgress, checkCanceled, detail, videoClock,
 }) {
   let submitted = 0;
+  let isFirstFrameOfClip = true;
 
   for await (const sample of videoSink.samples(clip.in, clip.out)) {
     try {
@@ -251,7 +270,23 @@ async function writeClipVideo({
 
       sample.setTimestamp(timestamp);
       sample.setDuration((srcEnd - srcStart) / clip.speed);
-      await videoSource.add(sample);
+
+      /*
+       * クリップの1フレーム目は必ずキーフレームにする。
+       *
+       * クリップの切れ目は映像が突然変わるため、放っておくとエンコーダが
+       * 「シーンチェンジだ」と判断して自前でキーフレームを挿し込む。
+       * 自前で挿し込まれたキーフレームは前後のフレームの並べ替え（Bフレーム）を
+       * 閉じないので、表示順で前に位置するフレームがキーフレームより後に出てきて、
+       * mp4に詰める側の「直前のキーフレームより前の時刻は入れられない」検査に
+       * 引っかかる（実機のSafari/H.264で発生。クリップが増えるほど当たりやすい）。
+       *
+       * こちらから明示的に要求したキーフレームは、それより前のフレームを
+       * すべて出し切ってから作られるので、並べ替えが切れ目をまたがない。
+       * カット位置の画質が上がる副次効果もある。
+       */
+      await videoSource.add(sample, isFirstFrameOfClip ? { keyFrame: true } : undefined);
+      isFirstFrameOfClip = false;
       submitted += 1;
 
       if (totalOut > 0) {

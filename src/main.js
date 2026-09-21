@@ -15,6 +15,7 @@ import {
 import { WaveformAnalyzer } from './audio/waveform-controller.js';
 import { concatFloat32, getAudioChannelCount } from './audio/waveform.js';
 import { detectCapabilities, describeCapabilities, verdictMessage } from './core/capabilities.js';
+import { BUILD_ID } from './core/version.js';
 import {
   SPEEDS,
   createEditList,
@@ -69,6 +70,7 @@ const dom = {
   verdict: el('verdict'),
   capList: el('capList'),
   copyCapsBtn: el('copyCapsBtn'),
+  buildId: el('buildId'),
   levelMeter: el('levelMeter'),
   waveformProgress: el('waveformProgress'),
   effectToggles: el('effectToggles'),
@@ -469,6 +471,7 @@ function renderQualityButtons() {
 }
 
 function renderCapabilities(caps) {
+  dom.buildId.textContent = `版 ${BUILD_ID}`;
   const verdict = verdictMessage(caps);
   dom.verdict.textContent = verdict.text;
   dom.verdict.className = `verdict tone-${verdict.tone}`;
@@ -489,6 +492,7 @@ function renderCapabilities(caps) {
 async function copyCapabilities() {
   const caps = state.capabilities ?? {};
   const lines = [
+    `版: ${BUILD_ID}`,
     `userAgent: ${navigator.userAgent}`,
     ...describeCapabilities(caps).map((r) => `${r.label}: ${r.ok ? 'OK' : 'NG'}`),
     `判定: ${caps.verdict ?? '-'}`,
@@ -717,6 +721,7 @@ function showResult(result, elapsedMs) {
   // エンコーダがフレームを落としていないか（latencyMode: 'realtime' の副作用）。
   const dropped = (result.framesSubmitted ?? 0) - (result.packetsEncoded ?? 0);
   if (dropped > 0) parts.push(`${dropped}フレーム欠落`);
+  if (result.usedSerialEncoder) parts.push('やり直し実行');
   dom.resultText.textContent = `書き出しました — ${parts.join(' · ')}`;
 
   // 実機で何が動いたかを報告できるよう、使われたコーデック文字列も出す。
