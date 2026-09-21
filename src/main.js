@@ -34,8 +34,12 @@ import { canShareFile, downloadFile, outputFileName, shareFile } from './core/sa
 import { acquireWakeLock, releaseWakeLock } from './core/wake-lock.js';
 import { Exporter } from './export/controller.js';
 import { DEFAULT_QUALITY, QUALITY_PRESETS, qualityLabel } from './export/quality.js';
+import { subtitlesFromTranscript } from './subtitles/model.js';
+import { defaultSubtitleStyle } from './subtitles/styles.js';
+import { DEFAULT_MODEL_ID, MODELS, Transcriber } from './subtitles/transcriber.js';
 import { MeterView } from './ui/meter.js';
 import { ClipPlayer } from './ui/player.js';
+import { SubtitlePanel } from './ui/subtitle-editor.js';
 import { Timeline } from './ui/timeline.js';
 
 const el = (id) => document.getElementById(id);
@@ -78,6 +82,26 @@ const dom = {
   silenceCutBtn: el('silenceCutBtn'),
   silenceUndoBtn: el('silenceUndoBtn'),
   silenceResult: el('silenceResult'),
+  transcribeModels: el('transcribeModels'),
+  transcribeBtn: el('transcribeBtn'),
+  transcribeCancelBtn: el('transcribeCancelBtn'),
+  transcribeProgress: el('transcribeProgress'),
+  transcribeBar: el('transcribeBar'),
+  transcribeText: el('transcribeText'),
+  transcribeError: el('transcribeError'),
+};
+
+/** 字幕パネルが使う要素だけをまとめたもの。 */
+const subtitleDom = {
+  overlay: el('subtitleOverlay'),
+  overlayText: el('subtitleOverlayText'),
+  video: el('video'),
+  schemes: el('subtitleSchemes'),
+  fonts: el('subtitleFonts'),
+  positions: el('subtitlePositions'),
+  sizes: el('subtitleSizes'),
+  current: el('subtitleCurrent'),
+  list: el('subtitleList'),
 };
 
 const state = {
@@ -95,6 +119,8 @@ const state = {
   silenceThresholdDb: DEFAULT_SILENCE_THRESHOLD_DB,
   waveformComplete: false, // 解析が最後まで終わったか（途中のデータで無音カットしないため）
   silenceUndo: null, // 無音カットの直前の編集リスト
+  transcribeModel: DEFAULT_MODEL_ID,
+  transcribing: false,
 };
 
 const player = new ClipPlayer(dom.video);
@@ -103,6 +129,8 @@ const exporter = new Exporter();
 const waveformAnalyzer = new WaveformAnalyzer();
 const previewAudio = new PreviewAudio(dom.video);
 const meterView = new MeterView(dom.levelMeter);
+const subtitlePanel = new SubtitlePanel(subtitleDom);
+const transcriber = new Transcriber();
 
 // トリムのドラッグ中、DOM更新を1フレームに1回へ間引くための一時置き場。
 let pendingTrim = null;
@@ -117,8 +145,10 @@ async function boot() {
   renderQualityButtons();
   renderSpeedButtons();
   renderSilenceThresholds();
+  renderTranscribeModels();
   renderClips();
   renderAudioSection();
+  renderSubtitlePanel();
   wireEvents();
 
   state.capabilities = await detectCapabilities();
@@ -151,6 +181,26 @@ function wireEvents() {
   dom.copyCapsBtn.addEventListener('click', copyCapabilities);
   dom.silenceCutBtn.addEventListener('click', applySilenceCut);
   dom.silenceUndoBtn.addEventListener('click', undoSilenceCut);
+  dom.transcribeBtn.addEventListener('click', startTranscribe);
+  dom.transcribeCancelBtn.addEventListener('click', () => transcriber.cancel());
+
+  /*
+   * 字幕の変更を編集リストへ書き戻す。
+   * ここで字幕パネルを作り直さないのは、入力中にテキスト欄が差し替わると
+   * カーソルが飛んでしまうため。パネルの中身はパネル自身が更新する。
+   */
+  subtitlePanel.addEventListener('change', (e) => {
+    if (!state.editList) return;
+    commit({ ...state.editList, subtitles: e.detail.subtitles });
+  });
+  subtitlePanel.addEventListener('stylechange', (e) => {
+    if (!state.editList) return;
+    commit({ ...state.editList, subtitleStyle: e.detail.style });
+  });
+  subtitlePanel.addEventListener('seek', (e) => {
+    player.seekSource(e.detail.time);
+    selectClipAt(e.detail.time);
+  });
 
   timeline.addEventListener('seek', (e) => {
     player.seekSource(e.detail.time);
@@ -289,6 +339,7 @@ async function openFile(file) {
   dom.silenceResult.textContent = '';
   renderClips();
   renderAudioSection();
+  renderSubtitlePanel();
   updateExportAvailability();
   onPlayerTimeUpdate();
 
@@ -357,6 +408,7 @@ function selectClipAt(t) {
 function onPlayerTimeUpdate() {
   const t = player.currentTime;
   timeline.setPlayhead(t);
+  subtitlePanel.setSourceTime(t);
   const total = state.editList ? state.editList.duration : 0;
   dom.timeDisplay.textContent = `${formatTime(t)} / ${formatTime(total)}`;
 }
@@ -628,12 +680,123 @@ function setSilenceUndo(list) {
   dom.silenceUndoBtn.hidden = list === null;
 }
 
+/* ---- 字幕 ---------------------------------------------------------------- */
+
+function renderSubtitlePanel() {
+  subtitlePanel.setState({
+    subtitles: state.editList?.subtitles ?? [],
+    // 動画を開く前も、どんな見た目が選べるかは見せておく（触れはしない）
+    style: state.editList?.subtitleStyle ?? defaultSubtitleStyle(),
+    duration: state.editList?.duration ?? 0,
+    enabled: Boolean(state.editList),
+  });
+  subtitlePanel.setSourceTime(player.currentTime);
+}
+
+function renderTranscribeModels() {
+  dom.transcribeModels.replaceChildren();
+  for (const model of MODELS) {
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'btn';
+    btn.setAttribute('role', 'radio');
+    const active = model.id === state.transcribeModel;
+    btn.classList.toggle('is-active', active);
+    btn.setAttribute('aria-checked', String(active));
+
+    const label = document.createElement('span');
+    label.textContent = model.label;
+    const hint = document.createElement('span');
+    hint.className = 't-hint';
+    hint.textContent = model.note;
+    btn.append(label, hint);
+
+    btn.addEventListener('click', () => {
+      state.transcribeModel = model.id;
+      renderTranscribeModels();
+    });
+    dom.transcribeModels.append(btn);
+  }
+}
+
+async function startTranscribe() {
+  if (state.transcribing || !state.file || !state.editList) return;
+
+  state.transcribing = true;
+  dom.transcribeError.hidden = true;
+  dom.transcribeProgress.hidden = false;
+  dom.transcribeCancelBtn.hidden = false;
+  setTranscribeProgress(0, '準備しています…');
+  updateExportAvailability();
+
+  // 再生しながらだと音声のデコードを取り合って遅くなるので止める。
+  player.video.pause();
+  // 数分かかることがあるので、画面が消えて処理が止まらないようにする。
+  await acquireWakeLock();
+
+  try {
+    const segments = await transcriber.run({
+      file: state.file,
+      duration: state.editList.duration,
+      // 波形が出そろっていれば、区切りを静かなところへ寄せられる。
+      waveform: state.waveformComplete ? state.waveform : null,
+      model: state.transcribeModel,
+      onProgress: (p) => setTranscribeProgress(p.ratio, transcribeLabel(p)),
+      onPartial: (partial) => applyTranscript(partial, false),
+    });
+    applyTranscript(segments, true);
+  } catch (err) {
+    if (err?.name === 'TranscribeCanceled') {
+      dom.transcribeText.textContent = '中止しました。ここまでの字幕は残ります。';
+    } else {
+      dom.transcribeError.textContent = `文字起こしに失敗しました: ${err?.message ?? err}`;
+      dom.transcribeError.hidden = false;
+      console.error(err);
+    }
+  } finally {
+    await releaseWakeLock();
+    state.transcribing = false;
+    dom.transcribeCancelBtn.hidden = true;
+    updateExportAvailability();
+  }
+}
+
+/**
+ * 文字起こしの結果を字幕にする。
+ *
+ * 途中経過でも呼ばれるので、そのたびに置き換える（前の途中経過は捨てる）。
+ * 手で直した字幕は消えてしまうが、下書きを作る前に手で直すことは無いので割り切る。
+ */
+function applyTranscript(segments, final) {
+  if (!state.editList) return;
+  const subtitles = subtitlesFromTranscript(segments, state.editList.duration);
+  commit({ ...state.editList, subtitles });
+  renderSubtitlePanel();
+  if (final) {
+    dom.transcribeProgress.hidden = true;
+    dom.transcribeText.textContent = `${subtitles.length}行の字幕ができました。`;
+  }
+}
+
+function transcribeLabel(p) {
+  if (p.phase === 'model') return p.detail ?? '準備しています…';
+  return `聞き取り中 ${Math.round(p.ratio * 100)}%${p.detail ? ` · ${p.detail}` : ''}`;
+}
+
+function setTranscribeProgress(ratio, text) {
+  dom.transcribeBar.style.width = `${Math.round(Math.min(1, Math.max(0, ratio)) * 100)}%`;
+  dom.transcribeText.textContent = text;
+}
+
 /* ---- 書き出し ------------------------------------------------------------ */
+
 
 function updateExportAvailability() {
   const caps = state.capabilities;
   const ready = Boolean(state.file && state.editList) && caps?.canExport === true && !state.exporting;
   dom.exportBtn.disabled = !ready;
+  // 文字起こしは書き出しと違い、H.264が無い端末でも動く（音声しか見ないため）。
+  dom.transcribeBtn.disabled = !state.file || state.transcribing || !Transcriber.available;
 
   if (!state.editList) {
     dom.exportEstimate.textContent = '';
@@ -718,6 +881,7 @@ function showResult(result, elapsedMs) {
     `処理 ${(elapsedMs / 1000).toFixed(1)}秒`,
   ];
   if (!result.hasAudio) parts.push('音声なし');
+  if (result.burnedSubtitles > 0) parts.push(`字幕${result.burnedSubtitles}行`);
   // エンコーダがフレームを落としていないか（latencyMode: 'realtime' の副作用）。
   const dropped = (result.framesSubmitted ?? 0) - (result.packetsEncoded ?? 0);
   if (dropped > 0) parts.push(`${dropped}フレーム欠落`);

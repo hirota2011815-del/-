@@ -383,3 +383,165 @@ html, body {
 }
 
 .silence-actions .btn { flex: 1; }
+
+/* ---- 字幕 ---------------------------------------------------------------- */
+
+/* プレビューに重ねる字幕。位置の3択はここで出し分ける。 */
+.subtitle-overlay {
+  position: absolute;
+  left: 0;
+  right: 0;
+  display: flex;
+  justify-content: center;
+  padding: 0 6%;
+  pointer-events: none;
+  text-align: center;
+}
+
+.subtitle-overlay[data-position="top"] { top: 5.5%; align-items: flex-start; }
+.subtitle-overlay[data-position="middle"] { top: 0; bottom: 0; align-items: center; }
+.subtitle-overlay[data-position="bottom"] { bottom: 5.5%; align-items: flex-end; }
+
+.subtitle-overlay span {
+  display: inline-block;
+  white-space: pre-wrap;
+  word-break: break-word;
+  border-radius: 4px;
+}
+
+.style-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  margin-bottom: 8px;
+}
+
+.style-row .threshold-label { flex: 0 0 3.5em; padding-top: 6px; }
+
+/* 選択式のチップ。横に溢れたら折り返す（スマホ幅で1行に収めない）。 */
+.chip-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  flex: 1;
+  min-width: 0;
+}
+
+.chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  min-height: 36px;
+  padding: 0 10px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--panel-2);
+  color: var(--text);
+  font-family: inherit;
+  font-size: 0.82rem;
+  cursor: pointer;
+}
+
+.chip.is-active { background: var(--accent-dark); border-color: var(--accent); }
+
+.chip-swatch {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  border: 2px solid;
+  border-radius: 5px;
+  font-size: 0.72rem;
+  font-weight: 700;
+  line-height: 1;
+}
+
+.subtitle-current {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.subtitle-times {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.nudge-group {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.nudge-label { font-size: 0.8rem; color: var(--muted); }
+
+.nudge-value {
+  min-width: 4.2em;
+  font-variant-numeric: tabular-nums;
+  font-size: 0.9rem;
+}
+
+.nudge-group .btn { min-width: 40px; padding: 0 8px; }
+
+.subtitle-text {
+  width: 100%;
+  padding: 8px 10px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--panel-2);
+  color: var(--text);
+  font-family: inherit;
+  font-size: 1rem;
+  line-height: 1.4;
+  resize: vertical;
+}
+
+.subtitle-text:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
+
+/* 行が増えても画面を押し下げないよう、一覧だけスクロールさせる。 */
+.subtitle-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  max-height: 220px;
+  overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
+}
+
+.subtitle-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  min-height: 38px;
+  padding: 4px 10px;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  background: var(--panel-2);
+  color: var(--text);
+  font-family: inherit;
+  font-size: 0.88rem;
+  text-align: left;
+  cursor: pointer;
+}
+
+.subtitle-row.is-active { border-color: var(--accent); background: var(--accent-dark); }
+
+.subtitle-row-time {
+  flex: 0 0 auto;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+  font-size: 0.8rem;
+}
+
+.subtitle-row.is-active .subtitle-row-time { color: #dce8ff; }
+
+.subtitle-row-text {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}

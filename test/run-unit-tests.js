@@ -50,6 +50,27 @@ import {
 } from '../src/audio/effects.js';
 import { detectSoundedRanges } from '../src/audio/silence.js';
 import { replaceClips } from '../src/core/edit-list.js';
+import {
+  MIN_SUBTITLE_DURATION,
+  addSubtitle,
+  createSubtitle,
+  removeSubtitle,
+  subtitleAt,
+  subtitlesFromTranscript,
+  updateSubtitle,
+} from '../src/subtitles/model.js';
+import {
+  DEFAULT_PRESET_ID,
+  STYLE_PRESETS,
+  defaultSubtitleStyle,
+  findPreset,
+  resolveStyle,
+  toCssText,
+} from '../src/subtitles/styles.js';
+import { drawSubtitle, layoutSubtitle, wrapLines } from '../src/subtitles/render.js';
+import { WINDOW_MAX_SEC, planWindows } from '../src/subtitles/windows.js';
+import { downmixToMono, resampleMonoLinear } from '../src/subtitles/mono16k.js';
+import { toSegments } from '../src/subtitles/transcript.js';
 
 let passed = 0;
 let failed = 0;
@@ -628,6 +649,282 @@ test('検出した区間からクリップを作り直せる', () => {
   assert.equal(next.clips[1].speed, 1);
   assert.equal(next.clips[1].enabled, true);
   assert.equal(list.clips.length, 1, '元のリストが書き換えられている');
+});
+
+// ---- 字幕のデータ操作 ----
+
+test('字幕は時刻順に並ぶ', () => {
+  let subs = [];
+  subs = addSubtitle(subs, createSubtitle(5, 6, 'あと'));
+  subs = addSubtitle(subs, createSubtitle(1, 2, 'さき'));
+  assert.deepEqual(subs.map((s) => s.text), ['さき', 'あと']);
+});
+
+test('その時刻に出ている字幕が1つだけ返る', () => {
+  const subs = [createSubtitle(0, 2, 'A'), createSubtitle(1, 3, 'B')];
+  assert.equal(subtitleAt(subs, 1.5).text, 'A', '先に始まったほうを採るはず');
+  assert.equal(subtitleAt(subs, 2.5).text, 'B');
+  assert.equal(subtitleAt(subs, 3), null, '終わりの時刻は含まないはず');
+  assert.equal(subtitleAt(subs, -1), null);
+});
+
+test('短くしすぎても最小の長さが残る', () => {
+  const subs = [createSubtitle(1, 2, 'A')];
+  const shrunkEnd = updateSubtitle(subs, subs[0].id, { end: 1.05 }, 10);
+  assert.ok(shrunkEnd[0].end - shrunkEnd[0].start >= MIN_SUBTITLE_DURATION - 1e-9);
+  assert.equal(shrunkEnd[0].end, 1.05, '動かした側（終わり）はそのまま残るはず');
+
+  const shrunkStart = updateSubtitle(subs, subs[0].id, { start: 1.9 }, 10);
+  assert.equal(shrunkStart[0].start, 1.9, '動かした側（始まり）はそのまま残るはず');
+  assert.ok(shrunkStart[0].end - shrunkStart[0].start >= MIN_SUBTITLE_DURATION - 1e-9);
+});
+
+test('動画の長さをはみ出さない', () => {
+  const subs = [createSubtitle(1, 2, 'A')];
+  const moved = updateSubtitle(subs, subs[0].id, { end: 99 }, 3);
+  assert.equal(moved[0].end, 3);
+});
+
+test('文字を書き換えても時刻は変わらない', () => {
+  const subs = [createSubtitle(1, 2, 'もと')];
+  const next = updateSubtitle(subs, subs[0].id, { text: 'あと' }, 10);
+  assert.equal(next[0].text, 'あと');
+  assert.deepEqual([next[0].start, next[0].end], [1, 2]);
+});
+
+test('字幕を消せる', () => {
+  const subs = [createSubtitle(1, 2, 'A'), createSubtitle(3, 4, 'B')];
+  const next = removeSubtitle(subs, subs[0].id);
+  assert.deepEqual(next.map((s) => s.text), ['B']);
+  assert.equal(subs.length, 2, '元の配列が書き換えられている');
+});
+
+test('文字起こしの結果から字幕を作れる', () => {
+  const subs = subtitlesFromTranscript(
+    [
+      { start: 0, end: 1.5, text: ' こんにちは ' },
+      { start: 1.4, end: 3, text: '重なっている' },
+      { start: 3, end: 3.05, text: '短すぎる' },
+      { start: 4, end: 5, text: '   ' },
+      { start: 5, end: 6, text: 'さいご' },
+    ],
+    10,
+  );
+  assert.deepEqual(subs.map((s) => s.text), ['こんにちは', '重なっている', 'さいご']);
+  assert.equal(subs[0].text, 'こんにちは', '前後の空白が落ちていない');
+  assert.ok(subs[0].end <= subs[1].start + 1e-9, '重なりが残っている');
+});
+
+// ---- 字幕の見た目 ----
+
+test('プリセットは配色×書体の全組み合わせ', () => {
+  assert.equal(STYLE_PRESETS.length, 24);
+  assert.equal(new Set(STYLE_PRESETS.map((p) => p.id)).size, 24, 'idが重複している');
+  assert.ok(findPreset(DEFAULT_PRESET_ID).id === DEFAULT_PRESET_ID);
+  assert.equal(findPreset('存在しない').id, STYLE_PRESETS[0].id, '知らないidでも落ちないこと');
+  assert.equal(findPreset(defaultSubtitleStyle().preset).id, DEFAULT_PRESET_ID);
+});
+
+test('文字の大きさは映像の高さに比例する', () => {
+  const style = defaultSubtitleStyle();
+  const small = resolveStyle(style, 720);
+  const large = resolveStyle(style, 1440);
+  assert.equal(large.fontSize, small.fontSize * 2);
+  assert.ok(small.strokeWidth >= 2, '小さい映像でも縁取りが消えないこと');
+});
+
+test('帯ありの配色だけCSSに背景が入る', () => {
+  const band = toCssText(resolveStyle({ ...defaultSubtitleStyle(), preset: 'band-gothic' }, 1080));
+  const outline = toCssText(resolveStyle(defaultSubtitleStyle(), 1080));
+  assert.ok(band.includes('background:'));
+  assert.ok(!outline.includes('background:'));
+  assert.ok(outline.includes('text-shadow:'), '縁取りの代わりの影が入っていない');
+});
+
+// ---- 字幕の描画 ----
+
+/** measureText だけ持つ偽のコンテキスト。1文字の幅を fontSize の半分とみなす。 */
+function fakeCtx(fontSize = 60) {
+  const calls = [];
+  return {
+    calls,
+    font: '',
+    textAlign: '',
+    textBaseline: '',
+    fillStyle: '',
+    strokeStyle: '',
+    lineWidth: 0,
+    lineJoin: '',
+    miterLimit: 0,
+    measureText: (t) => ({ width: [...t].length * (fontSize / 2) }),
+    fillText: (...a) => calls.push(['fillText', ...a]),
+    strokeText: (...a) => calls.push(['strokeText', ...a]),
+    fillRect: (...a) => calls.push(['fillRect', ...a]),
+    save: () => calls.push(['save']),
+    restore: () => calls.push(['restore']),
+  };
+}
+
+test('長い行は折り返す', () => {
+  const ctx = fakeCtx();
+  // 1文字30px、最大150px → 1行5文字
+  const lines = wrapLines(ctx, 'あいうえおかきくけこさ', 150);
+  assert.deepEqual(lines, ['あいうえお', 'かきくけこ', 'さ']);
+});
+
+test('改行はそこで必ず折る', () => {
+  const ctx = fakeCtx();
+  assert.deepEqual(wrapLines(ctx, 'あい\nうえ', 1000), ['あい', 'うえ']);
+});
+
+test('句読点が行頭に来ない', () => {
+  const ctx = fakeCtx();
+  // そのまま折ると6文字目の「、」が次の行の頭に来てしまう
+  const lines = wrapLines(ctx, 'あいうえお、かきくけこ', 150);
+  assert.ok(!lines.slice(1).some((l) => l.startsWith('、')), `行頭に句読点が出ている: ${lines}`);
+  assert.deepEqual(lines, ['あいうえ', 'お、かきく', 'けこ']);
+});
+
+test('1文字でも溢れる幅でも止まらない', () => {
+  const ctx = fakeCtx();
+  assert.deepEqual(wrapLines(ctx, 'あい', 1), ['あ', 'い']);
+});
+
+test('位置の指定どおりに置かれる', () => {
+  const ctx = fakeCtx();
+  const h = 1080;
+  const base = defaultSubtitleStyle();
+  const bottom = layoutSubtitle(ctx, 'あ', resolveStyle(base, h), 1920, h);
+  const top = layoutSubtitle(ctx, 'あ', resolveStyle({ ...base, position: 'top' }, h), 1920, h);
+  const middle = layoutSubtitle(ctx, 'あ', resolveStyle({ ...base, position: 'middle' }, h), 1920, h);
+
+  assert.ok(top.top < middle.top && middle.top < bottom.top);
+  assert.ok(bottom.top + bottom.blockHeight <= h, '画面からはみ出している');
+  assert.ok(top.top > 0, '上端に貼り付いている');
+  assert.ok(Math.abs(middle.top + middle.blockHeight / 2 - h / 2) < 1, '中央になっていない');
+});
+
+test('行数が増えても画面からはみ出さない', () => {
+  const ctx = fakeCtx();
+  const style = resolveStyle(defaultSubtitleStyle(), 240);
+  const layout = layoutSubtitle(ctx, 'あ\nい\nう\nえ\nお\nか\nき\nく', style, 320, 240);
+  assert.ok(layout.top >= 0);
+});
+
+test('空の字幕は何も描かない', () => {
+  const ctx = fakeCtx();
+  drawSubtitle(ctx, '   ', resolveStyle(defaultSubtitleStyle(), 1080), 1920, 1080);
+  assert.equal(ctx.calls.length, 0);
+});
+
+test('縁取りを先に、塗りを後に描く', () => {
+  const ctx = fakeCtx();
+  drawSubtitle(ctx, 'あい', resolveStyle(defaultSubtitleStyle(), 1080), 1920, 1080);
+  const order = ctx.calls.map((c) => c[0]);
+  assert.ok(order.indexOf('strokeText') < order.indexOf('fillText'), '塗りが縁取りに潰される');
+  assert.ok(!order.includes('fillRect'), '縁取りの配色で帯が出ている');
+});
+
+test('帯ありの配色では行ごとに帯を敷く', () => {
+  const ctx = fakeCtx();
+  const style = resolveStyle({ ...defaultSubtitleStyle(), preset: 'band-gothic' }, 1080);
+  drawSubtitle(ctx, 'あい\nうえお', style, 1920, 1080);
+  const rects = ctx.calls.filter((c) => c[0] === 'fillRect');
+  assert.equal(rects.length, 2);
+  assert.ok(rects[1][3] > rects[0][3], '文字数が多い行の帯が広くない');
+  // 帯どうしが重なると半透明がそこだけ濃くなる
+  const [, , y0, , h0] = rects[0];
+  const [, , y1] = rects[1];
+  assert.ok(y0 + h0 <= y1 + 1e-9, '帯が重なっている');
+});
+
+// ---- 文字起こしの下ごしらえ ----
+
+/** バケット0.1秒ぶんの偽の波形。quietAt 秒のところだけ音が小さい。 */
+function waveformWithQuietSpot(durationSec, quietAt) {
+  const bucketFrames = 100;
+  const sampleRate = 1000;
+  const count = Math.ceil((durationSec * sampleRate) / bucketFrames);
+  const rms = new Float32Array(count).fill(0.5);
+  rms[Math.floor((quietAt * sampleRate) / bucketFrames)] = 0.001;
+  return { rms, sampleRate, bucketFrames };
+}
+
+test('短い動画は1区間のまま', () => {
+  assert.deepEqual(planWindows({ duration: 12 }), [{ start: 0, end: 12 }]);
+  assert.deepEqual(planWindows({ duration: 0 }), []);
+});
+
+test('長い動画は隙間なく区間に分かれる', () => {
+  const windows = planWindows({ duration: 125 });
+  assert.ok(windows.length > 1);
+  assert.equal(windows[0].start, 0);
+  assert.equal(windows.at(-1).end, 125);
+  for (let i = 1; i < windows.length; i += 1) {
+    assert.equal(windows[i].start, windows[i - 1].end, '区間に隙間か重なりがある');
+  }
+  for (const w of windows) {
+    assert.ok(w.end - w.start <= WINDOW_MAX_SEC + 1e-9, `30秒を超える区間がある: ${w.end - w.start}`);
+    assert.ok(w.end > w.start);
+  }
+});
+
+test('区切りは静かなところに寄る', () => {
+  const waveform = waveformWithQuietSpot(120, 26);
+  const withWave = planWindows({ duration: 120, waveform });
+  const withoutWave = planWindows({ duration: 120 });
+  assert.ok(Math.abs(withWave[0].end - 26) < 0.2, `静かな26秒で切れていない: ${withWave[0].end}`);
+  assert.equal(withoutWave[0].end, 24, '波形が無いときは目安どおりに切るはず');
+});
+
+test('静かなところが探索範囲の外なら目安のまま切る', () => {
+  // 探索するのは20〜28秒。5秒のところが静かでも引っ張られない。
+  const windows = planWindows({ duration: 120, waveform: waveformWithQuietSpot(120, 5) });
+  assert.ok(windows[0].end >= 20 && windows[0].end <= 28, `${windows[0].end}`);
+});
+
+test('16kHzへのリサンプルで長さが1/3になる', () => {
+  const input = new Float32Array(48000).map((_, i) => i / 48000);
+  const out = resampleMonoLinear(input, 48000, 16000);
+  assert.equal(out.length, 16000);
+  // 直線はリサンプルしても直線のまま
+  assert.ok(Math.abs(out[8000] - 0.5) < 1e-3, `${out[8000]}`);
+  assert.equal(resampleMonoLinear(input, 16000, 16000).length, 48000, '同じレートなら素通しのはず');
+});
+
+test('ステレオをモノラルにすると平均になる', () => {
+  const mono = downmixToMono([new Float32Array([1, 0, -1]), new Float32Array([0, 0, 1])], 3);
+  assert.deepEqual([...mono], [0.5, 0, 0]);
+  const already = new Float32Array([0.3]);
+  assert.equal(downmixToMono([already], 1), already, 'モノラルはそのまま返すはず');
+});
+
+test('文字起こしの結果が元動画の時刻に直る', () => {
+  const segs = toSegments(
+    {
+      chunks: [
+        { timestamp: [0.5, 2.0], text: ' こんにちは ' },
+        { timestamp: [2.0, 4.0], text: '' },
+        { timestamp: [4.0, null], text: 'さようなら' },
+      ],
+    },
+    { start: 100, end: 124 },
+  );
+  assert.equal(segs.length, 2, '空のかたまりが残っている');
+  assert.deepEqual([segs[0].start, segs[0].end], [100.5, 102]);
+  assert.equal(segs[0].text, 'こんにちは');
+  assert.deepEqual([segs[1].start, segs[1].end], [104, 124], '終了時刻が無いときは区間の終わりまで');
+});
+
+test('タイムスタンプが返らなくても区間まるごとの字幕になる', () => {
+  const segs = toSegments({ text: 'まるごと' }, { start: 10, end: 20 });
+  assert.deepEqual(segs, [{ start: 10, end: 20, text: 'まるごと' }]);
+  assert.deepEqual(toSegments({ text: '  ' }, { start: 10, end: 20 }), []);
+});
+
+test('区間からはみ出した時刻は区間の中に収める', () => {
+  const segs = toSegments({ chunks: [{ timestamp: [-5, 99], text: 'はみ出し' }] }, { start: 10, end: 20 });
+  assert.deepEqual([segs[0].start, segs[0].end], [10, 20]);
 });
 
 console.log(`\n${passed} 件通過 / ${failed} 件失敗`);

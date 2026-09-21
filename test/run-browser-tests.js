@@ -69,6 +69,26 @@ try {
     if (!r.pass) failed += 1;
   }
 
+  /* --- 1.8. 字幕の焼き込み --- */
+  await page.waitForFunction(() => typeof window.__runSubtitleSuite === 'function');
+  const subtitleResults = await page.evaluate(() => window.__runSubtitleSuite());
+
+  console.log('\n字幕の焼き込み');
+  for (const r of subtitleResults) {
+    console.log(`  ${r.pass ? 'PASS' : 'FAIL'}  ${r.name}${r.detail ? `  (${r.detail})` : ''}`);
+    if (!r.pass) failed += 1;
+  }
+
+  /* --- 1.9. 字幕パネルの操作 --- */
+  await page.waitForFunction(() => typeof window.__runSubtitlePanelSuite === 'function');
+  const panelResults = await page.evaluate(() => window.__runSubtitlePanelSuite());
+
+  console.log('\n字幕パネルの操作');
+  for (const r of panelResults) {
+    console.log(`  ${r.pass ? 'PASS' : 'FAIL'}  ${r.name}${r.detail ? `  (${r.detail})` : ''}`);
+    if (!r.pass) failed += 1;
+  }
+
   /* --- 2. 画面が組み上がるか --- */
   console.log('\n画面');
   const errors = [];
@@ -95,6 +115,14 @@ try {
     })),
     thresholds: [...document.querySelectorAll('#silenceThresholds .btn')].map((b) => b.textContent),
     silenceDisabled: document.getElementById('silenceCutBtn').disabled,
+    subtitleSchemes: document.querySelectorAll('#subtitleSchemes .chip').length,
+    subtitleFonts: document.querySelectorAll('#subtitleFonts .chip').length,
+    subtitlePositions: document.querySelectorAll('#subtitlePositions .chip').length,
+    subtitleSizes: document.querySelectorAll('#subtitleSizes .chip').length,
+    transcribeModels: [...document.querySelectorAll('#transcribeModels .btn')].map((b) => b.textContent),
+    transcribeDisabled: document.getElementById('transcribeBtn').disabled,
+    subtitleOverlayHidden: document.getElementById('subtitleOverlay').hidden,
+    subtitleListText: document.getElementById('subtitleList').textContent,
   }));
 
   const uiChecks = [
@@ -114,6 +142,12 @@ try {
     ],
     ['無音のしきい値が3択', ui.thresholds.length === 3, ui.thresholds.join(',')],
     ['波形の解析前は無音カットを押せない', ui.silenceDisabled === true],
+    ['字幕の配色が6つ・書体が4つ', ui.subtitleSchemes === 6 && ui.subtitleFonts === 4, `${ui.subtitleSchemes}/${ui.subtitleFonts}`],
+    ['字幕の位置と大きさが3つずつ', ui.subtitlePositions === 3 && ui.subtitleSizes === 3],
+    ['文字起こしのモデルが2択', ui.transcribeModels.length === 2, ui.transcribeModels.join(',')],
+    ['動画未読み込みでは文字起こしできない', ui.transcribeDisabled === true],
+    ['字幕が無いときはプレビューに重ならない', ui.subtitleOverlayHidden === true],
+    ['字幕が無いときは一覧に案内が出る', ui.subtitleListText.includes('まだ字幕がありません'), ui.subtitleListText.trim().slice(0, 30)],
     ['JSエラーが出ない', errors.length === 0, errors.join(' | ')],
   ];
   for (const [name, pass, detail] of uiChecks) {

@@ -12,6 +12,8 @@
  *       { "id": "c1", "in": 0.0, "out": 12.4, "speed": 1, "enabled": true, "filter": null }
  *     ],
  *     "audio": { "normalizeGainDb": 0, "highpassHz": 0, "limiterDb": -1.5 },
+ *     "subtitles": [ { "id": "s1", "start": 1.2, "end": 3.0, "text": "こんにちは" } ],
+ *     "subtitleStyle": { "preset": "white-gothic-bold", "position": "bottom", "size": "medium" },
  *     "markers": [ { "t": 24.0, "label": "要確認" } ]
  *   }
  *
@@ -21,6 +23,8 @@
  */
 
 import { defaultAudioSettings } from '../audio/effects.js';
+import { MIN_SUBTITLE_DURATION, sortSubtitles } from '../subtitles/model.js';
+import { defaultSubtitleStyle, findPreset } from '../subtitles/styles.js';
 
 /** クリップ速度。自由入力にはしない（×2超は声が聞き取れず、×0.5未満は映像がカクつくため）。 */
 export const SPEEDS = [0.5, 0.75, 1, 1.25, 1.5, 2];
@@ -42,6 +46,9 @@ export function createEditList(sourceName, duration) {
     duration,
     clips: [makeClip(0, duration)],
     audio: defaultAudioSettings(),
+    // 字幕の時刻は元動画基準。カットし直しても言葉に貼り付いたままになる。
+    subtitles: [],
+    subtitleStyle: defaultSubtitleStyle(),
     markers: [],
   };
 }
@@ -209,6 +216,13 @@ export function toJSON(list) {
       filter: c.filter,
     })),
     audio: { ...list.audio },
+    subtitles: (list.subtitles ?? []).map((s) => ({
+      id: s.id,
+      start: round(s.start),
+      end: round(s.end),
+      text: s.text,
+    })),
+    subtitleStyle: { ...(list.subtitleStyle ?? defaultSubtitleStyle()) },
     markers: list.markers.map((m) => ({ t: round(m.t), label: m.label })),
   };
 }
@@ -257,11 +271,39 @@ export function load(key, duration) {
       duration,
       clips,
       audio: { ...defaultAudioSettings(), ...(data.audio ?? {}) },
+      subtitles: loadSubtitles(data.subtitles, duration),
+      subtitleStyle: loadSubtitleStyle(data.subtitleStyle),
       markers: Array.isArray(data.markers) ? data.markers : [],
     };
   } catch {
     return null;
   }
+}
+
+/** 保存済みの字幕。壊れた行は落として、残りは活かす。 */
+function loadSubtitles(raw, duration) {
+  if (!Array.isArray(raw)) return [];
+  const cleaned = raw
+    .map((s) => ({
+      // idが欠けていたらクリップ用の採番を借りる（種類は違うが、要るのは一意性だけ）
+      id: typeof s?.id === 'string' ? s.id : newClipId(),
+      start: clamp(Number(s?.start), 0, duration),
+      end: clamp(Number(s?.end), 0, duration),
+      text: typeof s?.text === 'string' ? s.text : '',
+    }))
+    .filter((s) => Number.isFinite(s.start) && Number.isFinite(s.end) && s.end - s.start >= MIN_SUBTITLE_DURATION);
+  return sortSubtitles(cleaned);
+}
+
+/** 保存済みの見た目。知らない値が入っていたら既定に戻す。 */
+function loadSubtitleStyle(raw) {
+  const base = defaultSubtitleStyle();
+  if (!raw || typeof raw !== 'object') return base;
+  return {
+    preset: findPreset(raw.preset).id,
+    position: ['top', 'middle', 'bottom'].includes(raw.position) ? raw.position : base.position,
+    size: ['large', 'medium', 'small'].includes(raw.size) ? raw.size : base.size,
+  };
 }
 
 export function clearSaved(key) {

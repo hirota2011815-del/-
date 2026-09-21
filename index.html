@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta name="color-scheme" content="dark">
-<title>動画編集 — ステップ1: 書き出しの検証</title>
+<title>動画編集</title>
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%234f93ff'/%3E%3Cpath d='M13 10l9 6-9 6z' fill='%23fff'/%3E%3C/svg%3E">
 <link rel="stylesheet" href="./src/ui/style.css">
 </head>
@@ -16,6 +16,7 @@
     <div class="preview-row">
       <div class="preview">
         <video id="video" playsinline webkit-playsinline></video>
+        <div id="subtitleOverlay" class="subtitle-overlay" aria-hidden="true"><span id="subtitleOverlayText"></span></div>
         <p id="previewPlaceholder" class="placeholder">動画を開いてください</p>
       </div>
       <canvas id="levelMeter" class="level-meter" width="1" height="1"></canvas>
@@ -76,6 +77,63 @@
     </div>
   </section>
 
+  <!-- 6. 字幕 -->
+  <section class="panel">
+    <h2 class="panel-title">字幕</h2>
+
+    <div class="subsection">
+      <h3 class="subsection-title">自動で文字起こし</h3>
+      <p class="muted">
+        話している言葉を聞き取って、字幕の下書きを作ります。聞き取りは端末の中だけで行い、
+        動画も音声もどこにも送りません。初回だけ聞き取りの部品をダウンロードします（2回目以降は不要）。
+      </p>
+      <div class="threshold-row">
+        <span class="threshold-label">聞き取りの精度</span>
+        <div id="transcribeModels" class="threshold-buttons" role="radiogroup" aria-label="聞き取りの精度"></div>
+      </div>
+      <div class="silence-actions">
+        <button id="transcribeBtn" class="btn" type="button" disabled>字幕を作る</button>
+        <button id="transcribeCancelBtn" class="btn btn-danger" type="button" hidden>中止</button>
+      </div>
+      <div id="transcribeProgress" class="progress-box" hidden>
+        <div class="progress-track"><div id="transcribeBar" class="progress-bar"></div></div>
+        <p id="transcribeText" class="progress-text">準備中…</p>
+      </div>
+      <p id="transcribeError" class="error-text" hidden></p>
+    </div>
+
+    <div class="subsection">
+      <h3 class="subsection-title">見た目</h3>
+      <div class="style-row">
+        <span class="threshold-label">配色</span>
+        <div id="subtitleSchemes" class="chip-row" role="radiogroup" aria-label="配色"></div>
+      </div>
+      <div class="style-row">
+        <span class="threshold-label">書体</span>
+        <div id="subtitleFonts" class="chip-row" role="radiogroup" aria-label="書体"></div>
+      </div>
+      <div class="style-row">
+        <span class="threshold-label">位置</span>
+        <div id="subtitlePositions" class="chip-row" role="radiogroup" aria-label="位置"></div>
+      </div>
+      <div class="style-row">
+        <span class="threshold-label">大きさ</span>
+        <div id="subtitleSizes" class="chip-row" role="radiogroup" aria-label="大きさ"></div>
+      </div>
+      <p class="muted">選んだ見た目はプレビューにそのまま出ます。書き出すと映像に焼き込まれます。</p>
+    </div>
+
+    <div class="subsection">
+      <h3 class="subsection-title">いま出ている字幕</h3>
+      <div id="subtitleCurrent" class="subtitle-current"></div>
+    </div>
+
+    <div class="subsection">
+      <h3 class="subsection-title">字幕の一覧</h3>
+      <div id="subtitleList" class="subtitle-list"></div>
+    </div>
+  </section>
+
   <!-- 8. 書き出し -->
   <section class="panel">
     <h2 class="panel-title">書き出し</h2>
@@ -113,7 +171,7 @@
   </section>
 
   <footer class="footer">
-    <p>ステップ1: 書き出しの検証（カット・除外・速度変更・画質選択）</p>
+    <p>カット・トリム・速度・dB表示・音の仕上げ・無音カット・字幕まで実装済み（映像フィルターとマーカーは次のステップ）</p>
   </footer>
 </main>
 

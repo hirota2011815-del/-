@@ -53,9 +53,12 @@ export function colorToSecond(r, g, b, tolerance = 45) {
 
 /**
  * @param {{video: string, audio: string}} codecs
+ * @param {{rotation?: 0|90|180|270}} [options]
+ *   rotation を指定すると「ピクセルは横向きのまま、再生時に回して表示せよ」という
+ *   メタデータ付きの動画になる（スマホの縦撮りと同じ形）。
  * @returns {Promise<File>}
  */
-export async function buildFixture(codecs) {
+export async function buildFixture(codecs, options = {}) {
   const { width, height, fps, durationSec, sampleRate, channels } = FIXTURE;
 
   const output = new Output({
@@ -68,7 +71,7 @@ export async function buildFixture(codecs) {
     bitrate: 2_000_000,
     keyFrameInterval: 1,
   });
-  output.addVideoTrack(videoSource);
+  output.addVideoTrack(videoSource, options.rotation ? { rotation: options.rotation } : undefined);
 
   const audioSource = new AudioSampleSource({ codec: codecs.audio, bitrate: 128_000 });
   output.addAudioTrack(audioSource);

@@ -28,6 +28,7 @@ import { enabledClips, outputDuration } from '../core/edit-list.js';
 import { LinearResampler } from './resampler.js';
 import { audioBitrate, videoBitrate } from './quality.js';
 import { isTimestampOrderError, serialEncoding } from './serial-encoder.js';
+import { createSubtitleBurner } from './subtitle-burner.js';
 
 /** 一度に書き出す音声のかたまり（フレーム数）。小さいほど反応がよく、大きいほど速い。 */
 const AUDIO_CHUNK_FRAMES = 2048;
@@ -106,8 +107,31 @@ async function encodeOnce({
     const audioTrack = await input.getPrimaryAudioTrack();
     const audioUsable = audioTrack ? await audioTrack.canDecode() : false;
 
-    const width = await videoTrack.getCodedWidth();
-    const height = await videoTrack.getCodedHeight();
+    const codedWidth = await videoTrack.getCodedWidth();
+    const codedHeight = await videoTrack.getCodedHeight();
+
+    /*
+     * 字幕があるときは全フレームをCanvasに描き直す（焼き込み）。
+     *
+     * 字幕が出ているフレームだけ通す手もあるが、そうしない：
+     *  - Canvasを通すと色がYUV→RGB→YUVと往復するので、字幕の出入りで色がわずかに動く
+     *  - Canvasの出力は「起こしたあと」の大きさなので、素通しのフレームと寸法が食い違う
+     * どちらも画面に出てしまうため、通すなら全部通す。
+     */
+    // 文字を消しただけの行が残っていても、焼き込むものが無ければ素通しのままにする。
+    const subtitles = (editList.subtitles ?? []).filter((s) => (s.text ?? '').trim() !== '');
+    const burner = subtitles.length > 0
+      ? createSubtitleBurner({
+          subtitles,
+          style: editList.subtitleStyle,
+          codedWidth,
+          codedHeight,
+          rotation: await videoTrack.getRotation(),
+          flip: await videoTrack.getFlip(),
+        })
+      : null;
+    const width = burner ? burner.width : codedWidth;
+    const height = burner ? burner.height : codedHeight;
 
     output = new Output({
       format: new Mp4OutputFormat({ fastStart: 'in-memory' }),
@@ -147,9 +171,10 @@ async function encodeOnce({
       },
     });
     // 回転はピクセルを回さずトラックのメタデータで持ち回す（縦向きで撮った動画が寝ないように）。
-    output.addVideoTrack(videoSource, {
-      transformationMatrix: await videoTrack.getTransformationMatrix(),
-    });
+    // 焼き込みのときだけは別で、Canvasの時点で起こし済みなので付けない（二重に回るため）。
+    output.addVideoTrack(videoSource, burner
+      ? {}
+      : { transformationMatrix: await videoTrack.getTransformationMatrix() });
 
     let audioSource = null;
     let audioChannels = 0;
@@ -198,7 +223,7 @@ async function encodeOnce({
 
       // 映像と音声を同時に流すと同じ入力ファイルを2か所から読んで遅くなるので、順に処理する。
       framesSubmitted += await writeClipVideo({
-        videoSink, videoSource, clip, cursor, totalOut, onProgress, checkCanceled, detail, videoClock,
+        videoSink, videoSource, clip, cursor, totalOut, onProgress, checkCanceled, detail, videoClock, burner,
       });
 
       if (audioSink && audioWriter) {
@@ -220,6 +245,7 @@ async function encodeOnce({
       hasAudio: Boolean(audioSource),
       width,
       height,
+      burnedSubtitles: subtitles.length,
       videoEncoderConfig,
       audioEncoderConfig,
       framesSubmitted,
@@ -249,7 +275,7 @@ async function encodeOnce({
  * @returns {Promise<number>} 実際に投入したフレーム数
  */
 async function writeClipVideo({
-  videoSink, videoSource, clip, cursor, totalOut, onProgress, checkCanceled, detail, videoClock,
+  videoSink, videoSource, clip, cursor, totalOut, onProgress, checkCanceled, detail, videoClock, burner,
 }) {
   let submitted = 0;
   let isFirstFrameOfClip = true;
@@ -285,7 +311,18 @@ async function writeClipVideo({
        * すべて出し切ってから作られるので、並べ替えが切れ目をまたがない。
        * カット位置の画質が上がる副次効果もある。
        */
-      await videoSource.add(sample, isFirstFrameOfClip ? { keyFrame: true } : undefined);
+      const options = isFirstFrameOfClip ? { keyFrame: true } : undefined;
+      if (burner) {
+        // 字幕は元動画の時刻で持っているので、このフレームの元の時刻で引き当てる。
+        const painted = burner.paint(sample, srcStart, timestamp, sample.duration);
+        try {
+          await videoSource.add(painted, options);
+        } finally {
+          painted.close();
+        }
+      } else {
+        await videoSource.add(sample, options);
+      }
       isFirstFrameOfClip = false;
       submitted += 1;
 
