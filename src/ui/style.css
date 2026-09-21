@@ -130,7 +130,9 @@ html, body {
   height: 72px;
   border-radius: 8px;
   background: #12151c;
-  touch-action: pan-y;
+  /* タップ・ドラッグ・ピンチをすべてJS側（Timelineクラス）で処理するため、
+     ブラウザ標準のスクロール・ズームジェスチャーは無効にする。 */
+  touch-action: none;
 }
 
 /* クリップ一覧: 横スクロールのカード */

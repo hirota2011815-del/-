@@ -19,6 +19,7 @@ import {
 } from '../src/core/edit-list.js';
 import { LinearResampler } from '../src/export/resampler.js';
 import { videoBitrate } from '../src/export/quality.js';
+import { applyPinch, clampView, nearestHandle, timeToX, xToTime } from '../src/ui/timeline-math.js';
 
 let passed = 0;
 let failed = 0;
@@ -196,6 +197,69 @@ test('画質が上がるほどビットレートが上がる', () => {
 test('解像度が下がるとビットレートも下がる', () => {
   assert.ok(videoBitrate('standard', 1280, 720) < videoBitrate('standard', 1920, 1080));
   assert.ok(videoBitrate('standard', 3840, 2160) > videoBitrate('standard', 1920, 1080));
+});
+
+console.log('\nタイムラインの座標計算（ズーム・パン・トリムの当たり判定）');
+
+test('時刻とx座標は表示窓の中で線形に対応する', () => {
+  assert.equal(timeToX(0, 10, 300, 0), 0);
+  assert.equal(timeToX(0, 10, 300, 10), 300);
+  assert.equal(timeToX(0, 10, 300, 5), 150);
+  assert.equal(xToTime(0, 10, 300, 150), 5);
+});
+
+test('表示窓がずれていてもx座標は窓基準になる', () => {
+  assert.equal(timeToX(20, 10, 300, 25), 150);
+  assert.equal(xToTime(20, 10, 300, 0), 20);
+});
+
+test('ズームは最小値と全体長でクランプされる', () => {
+  assert.deepEqual(clampView(0, 0.01, 30, 1), { viewStart: 0, viewDuration: 1 });
+  assert.deepEqual(clampView(0, 1000, 30, 1), { viewStart: 0, viewDuration: 30 });
+});
+
+test('パンは0と(全体長-表示長)の間でクランプされる', () => {
+  assert.deepEqual(clampView(-5, 10, 30, 1), { viewStart: 0, viewDuration: 10 });
+  assert.deepEqual(clampView(100, 10, 30, 1), { viewStart: 20, viewDuration: 10 });
+});
+
+test('ピンチで指を広げるとズームインする（表示時間が短くなる）', () => {
+  const result = applyPinch({
+    viewStart: 0, viewDuration: 10, width: 300, duration: 30, minViewDuration: 1,
+    prevMidX: 150, newMidX: 150, scaleDelta: 2, // 指の間隔が2倍に広がった
+  });
+  assert.ok(result.viewDuration < 10, `${result.viewDuration}`);
+  assert.ok(Math.abs(result.viewDuration - 5) < 1e-9);
+});
+
+test('ピンチの中間点の時刻がズーム後も同じx位置に留まる', () => {
+  // 中間点(x=150)は元の表示窓では時刻5秒。ズーム後もx=150に時刻5秒が来るはず。
+  const before = { viewStart: 0, viewDuration: 10, width: 300 };
+  const timeAtMidBefore = xToTime(before.viewStart, before.viewDuration, before.width, 150);
+  const after = applyPinch({
+    ...before, duration: 30, minViewDuration: 1, prevMidX: 150, newMidX: 150, scaleDelta: 2,
+  });
+  const timeAtMidAfter = xToTime(after.viewStart, after.viewDuration, before.width, 150);
+  assert.ok(Math.abs(timeAtMidBefore - timeAtMidAfter) < 1e-9, `${timeAtMidBefore} vs ${timeAtMidAfter}`);
+});
+
+test('指を狭めるとズームアウトする', () => {
+  const result = applyPinch({
+    viewStart: 5, viewDuration: 5, width: 300, duration: 30, minViewDuration: 1,
+    prevMidX: 150, newMidX: 150, scaleDelta: 0.5, // 間隔が半分に
+  });
+  assert.ok(Math.abs(result.viewDuration - 10) < 1e-9, `${result.viewDuration}`);
+});
+
+test('しきい値内なら最も近いハンドルが当たる', () => {
+  const handles = [{ edge: 'in', x: 50 }, { edge: 'out', x: 200 }];
+  assert.equal(nearestHandle(55, handles, 18).edge, 'in');
+  assert.equal(nearestHandle(190, handles, 18).edge, 'out');
+});
+
+test('しきい値の外では何にも当たらない', () => {
+  const handles = [{ edge: 'in', x: 50 }, { edge: 'out', x: 200 }];
+  assert.equal(nearestHandle(100, handles, 18), null);
 });
 
 console.log(`\n${passed} 件通過 / ${failed} 件失敗`);

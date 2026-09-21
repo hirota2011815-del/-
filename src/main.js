@@ -15,6 +15,7 @@ import {
   splitAt,
   storageKey,
   toggleEnabled,
+  trimClip,
 } from './core/edit-list.js';
 import { formatBytes, formatTime } from './core/format.js';
 import { canShareFile, downloadFile, outputFileName, shareFile } from './core/save-file.js';
@@ -75,6 +76,10 @@ const player = new ClipPlayer(dom.video);
 const timeline = new Timeline(dom.timeline);
 const exporter = new Exporter();
 
+// トリムのドラッグ中、DOM更新を1フレームに1回へ間引くための一時置き場。
+let pendingTrim = null;
+let trimRafId = 0;
+
 /* ---- 起動 --------------------------------------------------------------- */
 
 async function boot() {
@@ -108,6 +113,16 @@ function wireEvents() {
   timeline.addEventListener('seek', (e) => {
     player.seekSource(e.detail.time);
     selectClipAt(e.detail.time);
+  });
+  // ドラッグ中は指の動きの回数だけ飛んでくるので、DOM更新は1フレームに1回にまとめる。
+  timeline.addEventListener('trim', (e) => {
+    pendingTrim = e.detail;
+    if (trimRafId) return;
+    trimRafId = requestAnimationFrame(() => {
+      trimRafId = 0;
+      if (pendingTrim) commit(trimClip(state.editList, pendingTrim.clipId, pendingTrim.edge, pendingTrim.time));
+      pendingTrim = null;
+    });
   });
 
   player.addEventListener('timeupdate', onPlayerTimeUpdate);
@@ -201,7 +216,7 @@ function cutAtPlayhead() {
 function selectClipAt(t) {
   if (!state.editList) return;
   const clip = state.editList.clips.find((c) => t >= c.in && t < c.out);
-  if (!clip) return;
+  if (!clip || clip.id === state.selectedClipId) return; // スクラブ中に毎回作り直さない
   state.selectedClipId = clip.id;
   timeline.setSelected(clip.id);
   renderClips();

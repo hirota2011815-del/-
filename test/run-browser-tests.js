@@ -39,6 +39,16 @@ try {
     if (!r.pass) failed += 1;
   }
 
+  /* --- 1.5. タイムラインの操作（タップ・ドラッグ・ピンチ・トリム） --- */
+  await page.waitForFunction(() => typeof window.__runInteractionSuite === 'function');
+  const interactionResults = await page.evaluate(() => window.__runInteractionSuite());
+
+  console.log('\nタイムライン操作');
+  for (const r of interactionResults) {
+    console.log(`  ${r.pass ? 'PASS' : 'FAIL'}  ${r.name}${r.detail ? `  (${r.detail})` : ''}`);
+    if (!r.pass) failed += 1;
+  }
+
   /* --- 2. 画面が組み上がるか --- */
   console.log('\n画面');
   const errors = [];
