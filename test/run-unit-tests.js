@@ -20,6 +20,17 @@ import {
 import { LinearResampler } from '../src/export/resampler.js';
 import { videoBitrate } from '../src/export/quality.js';
 import { applyPinch, clampView, nearestHandle, timeToX, xToTime } from '../src/ui/timeline-math.js';
+import {
+  CLIP_THRESHOLD_DB,
+  DB_FLOOR,
+  HOT_THRESHOLD_DB,
+  aggregateRange,
+  amplitudeToDb,
+  dbToAmplitude,
+  dbToY,
+  loudnessHint,
+} from '../src/audio/dbscale.js';
+import { concatFloat32 } from '../src/audio/waveform.js';
 
 let passed = 0;
 let failed = 0;
@@ -260,6 +271,86 @@ test('しきい値内なら最も近いハンドルが当たる', () => {
 test('しきい値の外では何にも当たらない', () => {
   const handles = [{ edge: 'in', x: 50 }, { edge: 'out', x: 200 }];
   assert.equal(nearestHandle(100, handles, 18), null);
+});
+
+console.log('\ndB表示（振幅↔dB、集約、しきい値）');
+
+test('振幅1.0（フルスケール）は0dB', () => {
+  assert.ok(Math.abs(amplitudeToDb(1)) < 1e-9);
+});
+
+test('振幅0.5は約-6dB', () => {
+  assert.ok(Math.abs(amplitudeToDb(0.5) - -6.0206) < 0.01);
+});
+
+test('無音はDB_FLOORに丸められる', () => {
+  assert.equal(amplitudeToDb(0), DB_FLOOR);
+  assert.equal(amplitudeToDb(-0.001), DB_FLOOR); // 負値が来ても壊れない
+});
+
+test('dBFSと振幅は往復できる', () => {
+  assert.ok(Math.abs(dbToAmplitude(amplitudeToDb(0.3)) - 0.3) < 1e-6);
+});
+
+test('しきい値の定数がそれぞれ仕様どおり', () => {
+  assert.equal(HOT_THRESHOLD_DB, -3);
+  assert.equal(CLIP_THRESHOLD_DB, -0.6);
+});
+
+test('0dBは上端(y=0)、DB_FLOORは下端(y=height)に写る', () => {
+  assert.equal(dbToY(0, 100), 0);
+  assert.equal(dbToY(DB_FLOOR, 100), 100);
+  assert.equal(dbToY(-30, 100), 50); // -60〜0の中点
+});
+
+test('範囲外のdBはクランプされる', () => {
+  assert.equal(dbToY(10, 100), 0);
+  assert.equal(dbToY(-999, 100), 100);
+});
+
+test('バケットの集約: 範囲内の最大がpeakになる', () => {
+  const peaks = Float32Array.from([0.1, 0.5, 0.2, 0.9, 0.3]);
+  const rms = Float32Array.from([0.1, 0.1, 0.1, 0.1, 0.1]);
+  // sampleRate=10, bucketFrames=10 → 1バケット=1秒
+  const { peak } = aggregateRange(peaks, rms, 10, 10, 1, 4); // インデックス1〜3
+  // Float32Arrayを経由すると0.9はそのままの値では戻らない（float32の丸め誤差）ので近似で比べる。
+  assert.ok(Math.abs(peak - 0.9) < 1e-6, `${peak}`);
+});
+
+test('バケットの集約: 同じ大きさのRMSを4個集約すると同じ値になる', () => {
+  const peaks = Float32Array.from([0.5, 0.5, 0.5, 0.5]);
+  const rms = Float32Array.from([0.2, 0.2, 0.2, 0.2]);
+  const { rms: combined } = aggregateRange(peaks, rms, 10, 10, 0, 4);
+  assert.ok(Math.abs(combined - 0.2) < 1e-6, `${combined}`);
+});
+
+test('ズームしすぎて範囲がバケット1個未満でも、一番近い値を返す', () => {
+  const peaks = Float32Array.from([0.1, 0.9, 0.2]);
+  const rms = Float32Array.from([0.1, 0.4, 0.1]);
+  const { peak } = aggregateRange(peaks, rms, 10, 10, 1.02, 1.03); // 2番目のバケットのごく一部
+  assert.ok(Math.abs(peak - 0.9) < 1e-6, `${peak}`);
+});
+
+test('判断基準の目安ラベルが仕様の境界と一致する', () => {
+  assert.equal(loudnessHint(-1).tone, 'danger'); // 0〜-3dB
+  assert.equal(loudnessHint(-8).tone, 'warn'); // -3〜-12dB
+  assert.equal(loudnessHint(-18).tone, 'ok'); // -12〜-24dB
+  assert.equal(loudnessHint(-30).tone, 'low'); // -24dB未満
+});
+
+console.log('\n波形解析のユーティリティ');
+
+test('Float32Arrayの連結', () => {
+  const a = Float32Array.from([1, 2]);
+  const b = Float32Array.from([3, 4, 5]);
+  assert.deepEqual([...concatFloat32(a, b)], [1, 2, 3, 4, 5]);
+});
+
+test('片方が空でもそのまま返る（無駄なコピーをしない）', () => {
+  const a = Float32Array.from([1, 2]);
+  const empty = new Float32Array(0);
+  assert.equal(concatFloat32(a, empty), a);
+  assert.equal(concatFloat32(empty, a), a);
 });
 
 console.log(`\n${passed} 件通過 / ${failed} 件失敗`);

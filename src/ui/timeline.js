@@ -11,22 +11,37 @@
  * 座標はすべてCSSピクセルで扱う。Canvasのバッキング解像度だけ
  * devicePixelRatio 分を `ctx.setTransform` でまとめて拡大する。
  *
- * dBスケールの波形はステップ3、マーカーはステップ7でこの上に重ねる。
+ * 背景にdBスケールの波形（振幅ピーク＋RMS、-3dB超は赤強調）を敷き、
+ * クリップは半透明の色をかぶせるだけにして波形が透けて見えるようにする。
+ * マーカーはステップ7でこの上に重ねる。
  */
+import {
+  DB_CEILING,
+  GRID_DB_LINES,
+  HOT_THRESHOLD_DB,
+  aggregateRange,
+  amplitudeToDb,
+  dbToY,
+} from '../audio/dbscale.js';
 import { applyPinch, clampView, distance, midpoint, nearestHandle, timeToX, xToTime } from './timeline-math.js';
 
 const COLORS = {
   background: '#12151c',
-  clip: '#2f6fd0',
-  clipSelected: '#4f93ff',
-  clipDisabled: '#2a2f3a',
-  clipDisabledStripe: '#353b49',
+  clip: 'rgba(47,111,208,0.32)',
+  clipSelected: 'rgba(79,147,255,0.30)',
+  clipDisabled: 'rgba(42,47,58,0.72)',
+  clipDisabledStripe: '#4a5162',
   border: '#0b0d12',
   playhead: '#ff5c5c',
   tick: '#39404f',
   label: '#cfd6e4',
   handle: '#ffffff',
   handleShadow: 'rgba(0,0,0,0.5)',
+  gridLine: 'rgba(207,214,228,0.22)',
+  gridLabel: '#8d97ab',
+  hotColumn: 'rgba(255,70,70,0.28)',
+  waveRms: '#6fb0ff',
+  wavePeak: '#c8ddff',
 };
 
 /** ハンドルの当たり判定の半径（CSSピクセル）。指で掴みやすいよう見た目より広くとる。 */
@@ -45,6 +60,8 @@ export class Timeline extends EventTarget {
     this.list = null;
     this.playhead = 0;
     this.selectedClipId = null;
+    /** @type {{peaks: Float32Array, rms: Float32Array, sampleRate: number, bucketFrames: number} | null} */
+    this.waveform = null;
 
     this.pixelRatio = 1;
     this.width = 0;
@@ -76,9 +93,19 @@ export class Timeline extends EventTarget {
 
   setEditList(list) {
     this.list = list;
+    this.waveform = null; // 新しい動画に切り替わったら、前の波形は捨てる
     this.viewStart = 0;
     this.viewDuration = list ? list.duration : 0;
     this.minViewDuration = list ? Math.max(0.25, Math.min(list.duration, 1)) : 1;
+    this.draw();
+  }
+
+  /**
+   * 波形データを差し替える（解析が進むたびに、確定したぶんを都度渡す想定）。
+   * @param {{peaks: Float32Array, rms: Float32Array, sampleRate: number, bucketFrames: number}} waveform
+   */
+  setWaveform(waveform) {
+    this.waveform = waveform;
     this.draw();
   }
 
@@ -127,6 +154,26 @@ export class Timeline extends EventTarget {
     if (!this.list || this.list.duration <= 0) return;
 
     const toX = (t) => timeToX(this.viewStart, this.viewDuration, w, t);
+    const toT = (x) => xToTime(this.viewStart, this.viewDuration, w, x);
+
+    if (this.waveform && this.waveform.peaks.length > 0) {
+      this.#drawWaveform(toT);
+    }
+
+    // dBグリッド（0 / -3 / -6 / -12 / -20 / -40）。波形の上、クリップの下に薄く。
+    ctx.strokeStyle = COLORS.gridLine;
+    ctx.lineWidth = 1;
+    ctx.font = '9px system-ui, sans-serif';
+    ctx.textBaseline = 'top';
+    for (const db of GRID_DB_LINES) {
+      const y = Math.round(dbToY(db, h)) + 0.5;
+      ctx.beginPath();
+      ctx.moveTo(0, y);
+      ctx.lineTo(w, y);
+      ctx.stroke();
+      ctx.fillStyle = COLORS.gridLabel;
+      ctx.fillText(`${db}`, 2, Math.min(h - 10, y + 1));
+    }
 
     // 目盛り（表示中の時間窓に合わせて間隔を選ぶ）
     ctx.strokeStyle = COLORS.tick;
@@ -197,6 +244,46 @@ export class Timeline extends EventTarget {
       ctx.lineTo(px, h);
       ctx.stroke();
     }
+  }
+
+  /**
+   * 波形を1ピクセル列ずつ描く。各列の時間範囲をバケット配列から集約し、
+   * -3dBを超える列は背景を赤く強調しつつ、RMSを塗り、ピークを線で重ねる。
+   */
+  #drawWaveform(toT) {
+    const { ctx, width: w, height: h, waveform } = this;
+    const { peaks, rms, sampleRate, bucketFrames } = waveform;
+    const colStep = 1; // CSSピクセル1列ごとに集約する（デバイス解像度はctxの変換任せ）
+
+    for (let x = 0; x < w; x += colStep) {
+      const t0 = toT(x);
+      const t1 = toT(x + colStep);
+      const { peak, rms: rmsAmp } = aggregateRange(peaks, rms, sampleRate, bucketFrames, t0, t1);
+      const peakDb = amplitudeToDb(peak);
+      const rmsDb = amplitudeToDb(rmsAmp);
+
+      if (peakDb > HOT_THRESHOLD_DB) {
+        ctx.fillStyle = COLORS.hotColumn;
+        ctx.fillRect(x, 0, colStep, h);
+      }
+
+      const rmsY = dbToY(rmsDb, h);
+      ctx.fillStyle = COLORS.waveRms;
+      ctx.fillRect(x, rmsY, colStep, h - rmsY);
+
+      const peakY = dbToY(peakDb, h);
+      ctx.fillStyle = COLORS.wavePeak;
+      ctx.fillRect(x, peakY, colStep, 1.5);
+    }
+
+    // 0dB（上端＝音割れ上限）を強調する境界線。
+    ctx.strokeStyle = 'rgba(255,255,255,0.15)';
+    ctx.lineWidth = 1;
+    const ceilingY = Math.round(dbToY(DB_CEILING, h)) + 0.5;
+    ctx.beginPath();
+    ctx.moveTo(0, ceilingY);
+    ctx.lineTo(w, ceilingY);
+    ctx.stroke();
   }
 
   #drawHandle(x) {

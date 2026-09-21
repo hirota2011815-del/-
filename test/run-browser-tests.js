@@ -49,6 +49,16 @@ try {
     if (!r.pass) failed += 1;
   }
 
+  /* --- 1.6. 波形解析（音声のピーク/RMS抽出） --- */
+  await page.waitForFunction(() => typeof window.__runWaveformSuite === 'function');
+  const waveformResults = await page.evaluate(() => window.__runWaveformSuite());
+
+  console.log('\n波形解析');
+  for (const r of waveformResults) {
+    console.log(`  ${r.pass ? 'PASS' : 'FAIL'}  ${r.name}${r.detail ? `  (${r.detail})` : ''}`);
+    if (!r.pass) failed += 1;
+  }
+
   /* --- 2. 画面が組み上がるか --- */
   console.log('\n画面');
   const errors = [];
@@ -67,6 +77,8 @@ try {
     speeds: [...document.querySelectorAll('#speedButtons .btn')].map((b) => b.textContent),
     exportDisabled: document.getElementById('exportBtn').disabled,
     timelineHeight: document.getElementById('timeline').height,
+    hasLevelMeter: document.getElementById('levelMeter') !== null,
+    meterWidth: document.getElementById('levelMeter').getBoundingClientRect().width,
   }));
 
   const uiChecks = [
@@ -75,6 +87,9 @@ try {
     ['速度ボタンが6つ固定値', JSON.stringify(ui.speeds) === JSON.stringify(['×0.5', '×0.75', '×1', '×1.25', '×1.5', '×2']), ui.speeds.join(',')],
     ['動画未読み込みでは書き出せない', ui.exportDisabled === true],
     ['タイムラインのcanvasが実寸に合わせられる', ui.timelineHeight > 0, `${ui.timelineHeight}`],
+    ['dBグリッド分の高さが確保されている', ui.timelineHeight >= 100, `${ui.timelineHeight}`],
+    ['レベルメーターの要素がある', ui.hasLevelMeter],
+    ['レベルメーターがプレビューの横に並んでいる', ui.meterWidth > 0, `${ui.meterWidth}`],
     ['JSエラーが出ない', errors.length === 0, errors.join(' | ')],
   ];
   for (const [name, pass, detail] of uiChecks) {

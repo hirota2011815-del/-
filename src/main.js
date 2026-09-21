@@ -4,6 +4,9 @@
  * mp4を開いて、カット・除外・速度変更だけを指定し、WebCodecsで書き出す。
  * 目的は「この端末で本当に書き出せるか」を確かめること。
  */
+import { LevelMeter } from './audio/level-meter.js';
+import { WaveformAnalyzer } from './audio/waveform-controller.js';
+import { concatFloat32, getAudioChannelCount } from './audio/waveform.js';
 import { detectCapabilities, describeCapabilities, verdictMessage } from './core/capabilities.js';
 import {
   SPEEDS,
@@ -22,6 +25,7 @@ import { canShareFile, downloadFile, outputFileName, shareFile } from './core/sa
 import { acquireWakeLock, releaseWakeLock } from './core/wake-lock.js';
 import { Exporter } from './export/controller.js';
 import { DEFAULT_QUALITY, QUALITY_PRESETS, qualityLabel } from './export/quality.js';
+import { MeterView } from './ui/meter.js';
 import { ClipPlayer } from './ui/player.js';
 import { Timeline } from './ui/timeline.js';
 
@@ -57,6 +61,8 @@ const dom = {
   verdict: el('verdict'),
   capList: el('capList'),
   copyCapsBtn: el('copyCapsBtn'),
+  levelMeter: el('levelMeter'),
+  waveformProgress: el('waveformProgress'),
 };
 
 const state = {
@@ -70,15 +76,22 @@ const state = {
   exporting: false,
   resultFile: null,
   resultUrl: null,
+  waveform: null, // { peaks, rms, sampleRate, bucketFrames }
 };
 
 const player = new ClipPlayer(dom.video);
 const timeline = new Timeline(dom.timeline);
 const exporter = new Exporter();
+const waveformAnalyzer = new WaveformAnalyzer();
+const levelMeter = new LevelMeter(dom.video);
+const meterView = new MeterView(dom.levelMeter);
 
 // トリムのドラッグ中、DOM更新を1フレームに1回へ間引くための一時置き場。
 let pendingTrim = null;
 let trimRafId = 0;
+
+// 再生中だけ、レベルメーターをrequestAnimationFrameで更新する。
+let meterRafId = 0;
 
 /* ---- 起動 --------------------------------------------------------------- */
 
@@ -91,7 +104,10 @@ async function boot() {
   state.capabilities = await detectCapabilities();
   renderCapabilities(state.capabilities);
   updateExportAvailability();
-  requestAnimationFrame(() => timeline.resize());
+  requestAnimationFrame(() => {
+    timeline.resize();
+    meterView.resize();
+  });
 }
 
 function wireEvents() {
@@ -102,7 +118,11 @@ function wireEvents() {
     e.target.value = '';
   });
 
-  dom.playBtn.addEventListener('click', () => player.togglePlay());
+  dom.playBtn.addEventListener('click', () => {
+    // AudioContextはユーザー操作のハンドラ内でないと始められないため、ここで起動する。
+    levelMeter.start();
+    player.togglePlay();
+  });
   dom.cutBtn.addEventListener('click', cutAtPlayhead);
   dom.exportBtn.addEventListener('click', startExport);
   dom.cancelBtn.addEventListener('click', () => exporter.cancel());
@@ -128,6 +148,11 @@ function wireEvents() {
   player.addEventListener('timeupdate', onPlayerTimeUpdate);
   player.addEventListener('statechange', () => {
     dom.playBtn.textContent = player.playing ? '一時停止' : '再生';
+    if (player.playing) {
+      startMeterLoop();
+    } else {
+      stopMeterLoop();
+    }
   });
 
   // スペースキーでカット（仕様どおり「ここでカット」に割り当て）
@@ -139,6 +164,66 @@ function wireEvents() {
   });
 
   dom.video.addEventListener('loadedmetadata', () => timeline.resize());
+}
+
+/* ---- レベルメーター -------------------------------------------------------- */
+
+function startMeterLoop() {
+  if (meterRafId) return;
+  const loop = () => {
+    meterView.setLevels(levelMeter.read());
+    meterRafId = requestAnimationFrame(loop);
+  };
+  meterRafId = requestAnimationFrame(loop);
+}
+
+function stopMeterLoop() {
+  if (meterRafId) cancelAnimationFrame(meterRafId);
+  meterRafId = 0;
+  meterView.setLevels(null); // 静止画面に戻す
+}
+
+/* ---- 波形解析 -------------------------------------------------------------- */
+
+async function analyzeWaveformFor(file) {
+  state.waveform = { peaks: new Float32Array(0), rms: new Float32Array(0), sampleRate: 0, bucketFrames: 0 };
+  dom.waveformProgress.hidden = false;
+  dom.waveformProgress.textContent = '波形を解析中…';
+
+  try {
+    const channels = await getAudioChannelCount(file);
+    meterView.setChannelCount(channels || 1);
+    if (channels === 0) {
+      dom.waveformProgress.textContent = 'この動画には音声トラックがありません。';
+      return;
+    }
+
+    const result = await waveformAnalyzer.run({
+      file,
+      onChunk: (chunk) => {
+        if (state.file !== file) return; // 別のファイルに切り替わっていたら捨てる
+        state.waveform = {
+          peaks: concatFloat32(state.waveform.peaks, chunk.peaksSlice),
+          rms: concatFloat32(state.waveform.rms, chunk.rmsSlice),
+          sampleRate: chunk.sampleRate,
+          bucketFrames: chunk.bucketFrames,
+        };
+        timeline.setWaveform(state.waveform);
+        dom.waveformProgress.textContent = `波形を解析中… ${Math.round(chunk.ratio * 100)}%`;
+      },
+    });
+
+    if (state.file !== file) return;
+    if (!result) {
+      dom.waveformProgress.textContent = 'この動画には音声トラックがありません。';
+      return;
+    }
+    dom.waveformProgress.hidden = true;
+  } catch (err) {
+    if (state.file !== file) return;
+    dom.waveformProgress.textContent = `波形の解析に失敗しました: ${err?.message ?? err}`;
+    console.error(err);
+  }
 }
 
 /* ---- ファイルを開く ------------------------------------------------------ */
@@ -176,6 +261,8 @@ async function openFile(file) {
   renderClips();
   updateExportAvailability();
   onPlayerTimeUpdate();
+
+  analyzeWaveformFor(file);
 }
 
 function waitForDuration(video) {

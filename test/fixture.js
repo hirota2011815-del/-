@@ -22,6 +22,12 @@ export const SECOND_COLORS = [
   [240, 130, 20], [120, 20, 200], [20, 140, 90], [130, 130, 130],
 ];
 
+/**
+ * 秒ごとの音量パターン（4秒ずつ: 大きい→標準→小さい→無音）。
+ * 大きい区間の振幅0.95は 20*log10(0.95)≈-0.45dB で、-3dBを超える「音割れ危険」域に入る。
+ */
+export const AMPLITUDE_BY_SECOND = [0.95, 0.95, 0.95, 0.95, 0.3, 0.3, 0.3, 0.3, 0.03, 0.03, 0.03, 0];
+
 export const FIXTURE = {
   width: 320,
   height: 180,
@@ -84,7 +90,9 @@ export async function buildFixture(codecs) {
     sample.close();
   }
 
-  // 音声: 0.1秒ずつ、その秒に応じた高さのサイン波
+  // 音声: 0.1秒ずつ、その秒に応じた高さ・振幅のサイン波。
+  // 振幅は AMPLITUDE_BY_SECOND のとおり4秒ずつ「大きい→標準→小さい→無音」と切り替える。
+  // これで波形解析のテストが、区間ごとに違うdBを検出できているか確かめられる。
   const blockFrames = sampleRate / 10;
   const totalBlocks = durationSec * 10;
   for (let blk = 0; blk < totalBlocks; blk += 1) {
@@ -94,7 +102,8 @@ export async function buildFixture(codecs) {
       const globalFrame = startFrame + n;
       const second = Math.floor(globalFrame / sampleRate);
       const freq = 220 * (1 + second * 0.1);
-      const v = Math.sin((2 * Math.PI * freq * globalFrame) / sampleRate) * 0.3;
+      const amplitude = AMPLITUDE_BY_SECOND[second % AMPLITUDE_BY_SECOND.length];
+      const v = Math.sin((2 * Math.PI * freq * globalFrame) / sampleRate) * amplitude;
       data[n] = v;
       data[blockFrames + n] = v;
     }

@@ -11,13 +11,15 @@
 <body>
 <main class="app">
 
-  <!-- 1. プレビュー -->
+  <!-- 1. プレビュー＋メーター -->
   <section class="panel preview-panel">
-    <div class="preview">
-      <video id="video" playsinline webkit-playsinline></video>
-      <p id="previewPlaceholder" class="placeholder">動画を開いてください</p>
+    <div class="preview-row">
+      <div class="preview">
+        <video id="video" playsinline webkit-playsinline></video>
+        <p id="previewPlaceholder" class="placeholder">動画を開いてください</p>
+      </div>
+      <canvas id="levelMeter" class="level-meter" width="1" height="1"></canvas>
     </div>
-    <!-- 縦のdBメーターはステップ3でここに入る -->
   </section>
 
   <!-- 2. 操作バー -->
@@ -35,11 +37,12 @@
   <!-- 3. タイムライン -->
   <section class="panel">
     <h2 class="panel-title">タイムライン</h2>
-    <canvas id="timeline" class="timeline" height="72"></canvas>
+    <canvas id="timeline" class="timeline" height="128"></canvas>
+    <p id="waveformProgress" class="muted" hidden>波形を解析中…</p>
     <p class="muted">
       タップ／ドラッグでシーク・ピンチでズーム・ダブルタップで全体表示に戻る。
       選択中のクリップの端をドラッグするとトリムできます（白い縦線が目印）。
-      波形とマーカーはステップ3・7で入ります。
+      波形は振幅のdB表示（0〜-60dB）。赤い列は-3dBを超えている場所。マーカーはステップ7で入ります。
     </p>
   </section>
 

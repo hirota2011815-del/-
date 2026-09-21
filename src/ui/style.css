@@ -51,6 +51,19 @@ html, body {
 
 .preview-panel { padding: 8px; }
 
+.preview-row {
+  display: flex;
+  gap: 6px;
+  align-items: stretch;
+}
+
+.level-meter {
+  flex: 0 0 auto;
+  width: 44px;
+  border-radius: 8px;
+  background: #12151c;
+}
+
 .preview {
   position: relative;
   display: flex;
@@ -60,6 +73,8 @@ html, body {
   background: #000;
   border-radius: 8px;
   overflow: hidden;
+  flex: 1;
+  min-width: 0;
 }
 
 .preview video {
@@ -127,7 +142,7 @@ html, body {
 .timeline {
   display: block;
   width: 100%;
-  height: 72px;
+  height: 128px;
   border-radius: 8px;
   background: #12151c;
   /* タップ・ドラッグ・ピンチをすべてJS側（Timelineクラス）で処理するため、
