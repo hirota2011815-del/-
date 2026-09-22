@@ -53,9 +53,30 @@ export class Transcriber {
    * @param {(p: {phase: string, ratio: number, detail?: string}) => void} [p.onProgress]
    * @param {(segments: {start:number,end:number,text:string}[]) => void} [p.onPartial]
    *   区間が1つ終わるたびに、そこまでの結果を渡す（待っている間も画面に出せるように）。
+   * @param {{libraryUrl?: string, remoteHost?: string, wasmPaths?: object} | null} [p.endpoints]
+   *   モデルとWASMの取得先。既定（Hugging Face / jsDelivr）を使うので通常は渡さない。
+   *   テストがネットに出ずに済ませるための差し替え口。
    * @returns {Promise<{start:number,end:number,text:string}[]>}
    */
-  run({
+  async run(params) {
+    if (this.running) throw new Error('すでに文字起こし中です。');
+
+    try {
+      return await this.#runOnce(params);
+    } catch (err) {
+      /*
+       * WebGPUで駄目だったときだけ、WASMを指定して一度だけやり直す。
+       *
+       * 同じワーカーの中でやり直しても意味がない。ONNX Runtime は推論セッションの
+       * 作成を1本のPromiseの鎖で直列化していて、一度失敗するとその鎖に積んだ分は
+       * 全部同じ失敗を受け継ぐため。ワーカーを作り直せば鎖も新品になる。
+       */
+      if (err?.name === 'TranscribeCanceled' || err?.device !== 'webgpu') throw err;
+      return await this.#runOnce({ ...params, forceDevice: 'wasm' });
+    }
+  }
+
+  #runOnce({
     file,
     duration,
     waveform = null,
@@ -63,8 +84,10 @@ export class Transcriber {
     language = DEFAULT_LANGUAGE,
     onProgress = () => {},
     onPartial = () => {},
+    endpoints = null,
+    forceDevice = null,
+    mode = undefined,
   }) {
-    if (this.running) return Promise.reject(new Error('すでに文字起こし中です。'));
 
     let worker;
     try {
@@ -90,6 +113,8 @@ export class Transcriber {
         } else if (msg.type === 'error') {
           const err = new Error(msg.message);
           if (msg.canceled) err.name = 'TranscribeCanceled';
+          // どこで落ちたかを残す（WASMでやり直す価値があるかの判断に使う）
+          err.device = msg.device ?? null;
           reject(err);
         }
       };
@@ -107,6 +132,10 @@ export class Transcriber {
           : null,
         model,
         language,
+        endpoints,
+        forceDevice,
+        // テストの偽ワーカーが振る舞いを変えるための印。本物のワーカーは見ない。
+        mode,
       });
     }).finally(() => {
       this.rejectPending = null;

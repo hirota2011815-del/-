@@ -89,6 +89,16 @@ try {
     if (!r.pass) failed += 1;
   }
 
+  /* --- 1.10. 文字起こしライブラリが読み込めるか --- */
+  await page.waitForFunction(() => typeof window.__runTranscribeLibrarySuite === 'function');
+  const libResults = await page.evaluate(() => window.__runTranscribeLibrarySuite());
+
+  console.log('\n文字起こしの部品');
+  for (const r of libResults) {
+    console.log(`  ${r.pass ? 'PASS' : 'FAIL'}  ${r.name}${r.detail ? `  (${r.detail})` : ''}`);
+    if (!r.pass) failed += 1;
+  }
+
   /* --- 2. 画面が組み上がるか --- */
   console.log('\n画面');
   const errors = [];

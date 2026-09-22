@@ -7,7 +7,8 @@
     "test": "node test/run-unit-tests.js && node test/run-browser-tests.js",
     "test:unit": "node test/run-unit-tests.js",
     "test:browser": "node test/run-browser-tests.js",
-    "dev": "node test/dev-server.js"
+    "dev": "node test/dev-server.js",
+    "test:transcribe": "node test/offline-transcribe/fetch.mjs && node test/offline-transcribe/run.mjs"
   },
   "devDependencies": {
     "playwright": "^1.49.0"

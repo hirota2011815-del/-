@@ -70,7 +70,7 @@ import {
 import { drawSubtitle, layoutSubtitle, wrapLines } from '../src/subtitles/render.js';
 import { WINDOW_MAX_SEC, planWindows } from '../src/subtitles/windows.js';
 import { downmixToMono, resampleMonoLinear } from '../src/subtitles/mono16k.js';
-import { toSegments } from '../src/subtitles/transcript.js';
+import { dropQuietSegments, toSegments } from '../src/subtitles/transcript.js';
 
 let passed = 0;
 let failed = 0;
@@ -925,6 +925,39 @@ test('タイムスタンプが返らなくても区間まるごとの字幕に�
 test('区間からはみ出した時刻は区間の中に収める', () => {
   const segs = toSegments({ chunks: [{ timestamp: [-5, 99], text: 'はみ出し' }] }, { start: 10, end: 20 });
   assert.deepEqual([segs[0].start, segs[0].end], [10, 20]);
+});
+
+test('音が入っていない時間に出た字幕を捨てる', () => {
+  // 16kHzで3秒。前半1.5秒だけ音があり、後半は無音。
+  const sampleRate = 16000;
+  const audio = new Float32Array(sampleRate * 3);
+  for (let i = 0; i < sampleRate * 1.5; i += 1) {
+    audio[i] = Math.sin((2 * Math.PI * 220 * i) / sampleRate) * 0.3;
+  }
+
+  const segments = [
+    { start: 10.2, end: 11.2, text: '喋っている' },
+    { start: 12.0, end: 13.0, text: 'ご視聴ありがとうございました' }, // 無音の上の幻聴
+  ];
+  const kept = dropQuietSegments(segments, audio, 10, sampleRate);
+  assert.deepEqual(kept.map((s) => s.text), ['喋っている']);
+});
+
+test('小さい声は残す（幻聴の除去で消さない）', () => {
+  const sampleRate = 16000;
+  const audio = new Float32Array(sampleRate).fill(0);
+  // -30dB相当（0.0316）の小さい音
+  for (let i = 0; i < audio.length; i += 1) {
+    audio[i] = Math.sin((2 * Math.PI * 220 * i) / sampleRate) * 0.0316;
+  }
+  const kept = dropQuietSegments([{ start: 0, end: 1, text: 'ささやき' }], audio, 0, sampleRate);
+  assert.equal(kept.length, 1);
+});
+
+test('音声の範囲外に出た字幕は捨てる', () => {
+  const audio = new Float32Array(16000).fill(0.5);
+  const kept = dropQuietSegments([{ start: 50, end: 51, text: 'ずれている' }], audio, 0, 16000);
+  assert.equal(kept.length, 0);
 });
 
 console.log(`\n${passed} 件通過 / ${failed} 件失敗`);

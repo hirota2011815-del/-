@@ -44,6 +44,36 @@ function toNumber(v) {
   return Number.isFinite(n) ? n : null;
 }
 
+/**
+ * 音が入っていない区間に出た字幕を捨てる。
+ *
+ * Whisperは声が無いところでも、それらしい言葉を作ってしまう（幻聴）。
+ * 日本語では「ご視聴ありがとうございました」などが典型で、動画の無音部分に
+ * 勝手に現れる。決まり文句の一覧で消す手もあるが、本当にそう喋っている動画で
+ * 消えてしまうので採らない。
+ *
+ * 代わりに **その時間に実際に音が入っていたか** を測って判断する。
+ * 文字起こしに渡した音声がそのまま手元にあるので、追加のデコードは要らない。
+ *
+ * @param {{start:number,end:number,text:string}[]} segments 元動画の時刻に直した結果
+ * @param {Float32Array} audio その区間の音声（16kHzモノラル）
+ * @param {number} windowStart その音声が元動画の何秒目から始まるか
+ * @param {number} sampleRate
+ * @param {number} thresholdDb これを下回る区間は「喋っていない」とみなす
+ */
+export function dropQuietSegments(segments, audio, windowStart, sampleRate, thresholdDb = -45) {
+  const threshold = 10 ** (thresholdDb / 20);
+  return segments.filter((seg) => {
+    const from = Math.max(0, Math.round((seg.start - windowStart) * sampleRate));
+    const to = Math.min(audio.length, Math.round((seg.end - windowStart) * sampleRate));
+    if (to <= from) return false;
+
+    let sumSquares = 0;
+    for (let i = from; i < to; i += 1) sumSquares += audio[i] * audio[i];
+    return Math.sqrt(sumSquares / (to - from)) >= threshold;
+  });
+}
+
 function clamp(v, lo, hi) {
   return Math.min(hi, Math.max(lo, v));
 }
