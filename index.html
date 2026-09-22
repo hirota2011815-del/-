@@ -1,0 +1,180 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="color-scheme" content="dark">
+<title>動画編集</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%234f93ff'/%3E%3Cpath d='M13 10l9 6-9 6z' fill='%23fff'/%3E%3C/svg%3E">
+<link rel="stylesheet" href="./src/ui/style.css">
+</head>
+<body>
+<main class="app">
+
+  <!-- 1. プレビュー＋メーター -->
+  <section class="panel preview-panel">
+    <div class="preview-row">
+      <div class="preview">
+        <video id="video" playsinline webkit-playsinline></video>
+        <div id="subtitleOverlay" class="subtitle-overlay" aria-hidden="true"><span id="subtitleOverlayText"></span></div>
+        <p id="previewPlaceholder" class="placeholder">動画を開いてください</p>
+      </div>
+      <canvas id="levelMeter" class="level-meter" width="1" height="1"></canvas>
+    </div>
+  </section>
+
+  <!-- 2. 操作バー -->
+  <section class="panel">
+    <div class="controls">
+      <button id="openBtn" class="btn" type="button">ファイルを開く</button>
+      <button id="playBtn" class="btn btn-primary" type="button" disabled>再生</button>
+      <button id="cutBtn" class="btn" type="button" disabled>ここでカット</button>
+      <span id="timeDisplay" class="time" aria-live="off">0:00.0 / 0:00.0</span>
+    </div>
+    <input id="fileInput" class="visually-hidden" type="file" accept="video/*">
+    <p id="sourceInfo" class="muted"></p>
+  </section>
+
+  <!-- 3. タイムライン -->
+  <section class="panel">
+    <h2 class="panel-title">タイムライン</h2>
+    <canvas id="timeline" class="timeline" height="128"></canvas>
+    <p id="waveformProgress" class="muted" hidden>波形を解析中…</p>
+    <p class="muted">
+      タップ／ドラッグでシーク・ピンチでズーム・ダブルタップで全体表示に戻る。
+      選択中のクリップの端をドラッグするとトリムできます（白い縦線が目印）。
+      波形は振幅のdB表示（0〜-60dB）。赤い列は-3dBを超えている場所。マーカーはステップ7で入ります。
+    </p>
+  </section>
+
+  <!-- 4. クリップ一覧 -->
+  <section class="panel">
+    <h2 class="panel-title">クリップ</h2>
+    <div id="clipList" class="clip-list"></div>
+    <div id="speedBar" class="speed-bar" hidden>
+      <span class="speed-label">速度</span>
+      <div class="speed-buttons" id="speedButtons"></div>
+    </div>
+  </section>
+
+  <!-- 5. 音の仕上げ -->
+  <section class="panel">
+    <h2 class="panel-title">音の仕上げ</h2>
+    <div id="effectToggles" class="toggles"></div>
+
+    <div class="subsection">
+      <h3 class="subsection-title">無音の自動カット</h3>
+      <p class="muted">しゃべっていない「間」を外して、音が入っているところだけに切り分けます。</p>
+      <div class="threshold-row">
+        <span class="threshold-label">どこから無音とみなすか</span>
+        <div id="silenceThresholds" class="threshold-buttons" role="radiogroup" aria-label="無音のしきい値"></div>
+      </div>
+      <div class="silence-actions">
+        <button id="silenceCutBtn" class="btn" type="button" disabled>無音をカット</button>
+        <button id="silenceUndoBtn" class="btn" type="button" hidden>元に戻す</button>
+      </div>
+      <p id="silenceResult" class="muted"></p>
+    </div>
+  </section>
+
+  <!-- 6. 字幕 -->
+  <section class="panel">
+    <h2 class="panel-title">字幕</h2>
+
+    <div class="subsection">
+      <h3 class="subsection-title">自動で文字起こし</h3>
+      <p class="muted">
+        話している言葉を聞き取って、字幕の下書きを作ります。聞き取りは端末の中だけで行い、
+        動画も音声もどこにも送りません。初回だけ聞き取りの部品をダウンロードします（2回目以降は不要）。
+      </p>
+      <div class="threshold-row">
+        <span class="threshold-label">聞き取りの精度</span>
+        <div id="transcribeModels" class="threshold-buttons" role="radiogroup" aria-label="聞き取りの精度"></div>
+      </div>
+      <div class="silence-actions">
+        <button id="transcribeBtn" class="btn" type="button" disabled>字幕を作る</button>
+        <button id="transcribeCancelBtn" class="btn btn-danger" type="button" hidden>中止</button>
+      </div>
+      <div id="transcribeProgress" class="progress-box" hidden>
+        <div class="progress-track"><div id="transcribeBar" class="progress-bar"></div></div>
+        <p id="transcribeText" class="progress-text">準備中…</p>
+      </div>
+      <p id="transcribeError" class="error-text" hidden></p>
+    </div>
+
+    <div class="subsection">
+      <h3 class="subsection-title">見た目</h3>
+      <div class="style-row">
+        <span class="threshold-label">配色</span>
+        <div id="subtitleSchemes" class="chip-row" role="radiogroup" aria-label="配色"></div>
+      </div>
+      <div class="style-row">
+        <span class="threshold-label">書体</span>
+        <div id="subtitleFonts" class="chip-row" role="radiogroup" aria-label="書体"></div>
+      </div>
+      <div class="style-row">
+        <span class="threshold-label">位置</span>
+        <div id="subtitlePositions" class="chip-row" role="radiogroup" aria-label="位置"></div>
+      </div>
+      <div class="style-row">
+        <span class="threshold-label">大きさ</span>
+        <div id="subtitleSizes" class="chip-row" role="radiogroup" aria-label="大きさ"></div>
+      </div>
+      <p class="muted">選んだ見た目はプレビューにそのまま出ます。書き出すと映像に焼き込まれます。</p>
+    </div>
+
+    <div class="subsection">
+      <h3 class="subsection-title">いま出ている字幕</h3>
+      <div id="subtitleCurrent" class="subtitle-current"></div>
+    </div>
+
+    <div class="subsection">
+      <h3 class="subsection-title">字幕の一覧</h3>
+      <div id="subtitleList" class="subtitle-list"></div>
+    </div>
+  </section>
+
+  <!-- 8. 書き出し -->
+  <section class="panel">
+    <h2 class="panel-title">書き出し</h2>
+    <div class="quality" id="qualityButtons" role="radiogroup" aria-label="画質"></div>
+    <p id="exportEstimate" class="muted"></p>
+    <button id="exportBtn" class="btn btn-primary btn-wide" type="button" disabled>書き出す</button>
+
+    <div id="progressBox" class="progress-box" hidden>
+      <div class="progress-track"><div id="progressBar" class="progress-bar"></div></div>
+      <p id="progressText" class="progress-text">準備中…</p>
+      <p class="warn-text">書き出しが終わるまで画面を閉じないでください。</p>
+      <button id="cancelBtn" class="btn btn-danger" type="button">中止</button>
+    </div>
+
+    <div id="resultBox" class="result-box" hidden>
+      <p id="resultText" class="result-text"></p>
+      <p id="resultCodecs" class="muted"></p>
+      <div class="result-actions">
+        <button id="shareBtn" class="btn btn-primary" type="button" hidden>保存・共有</button>
+        <button id="downloadBtn" class="btn" type="button">ダウンロード</button>
+      </div>
+      <video id="resultPreview" class="result-preview" controls playsinline></video>
+    </div>
+
+    <p id="exportError" class="error-text" hidden></p>
+  </section>
+
+  <!-- この端末の対応状況 -->
+  <section class="panel">
+    <h2 class="panel-title">この端末の対応状況</h2>
+    <p id="verdict" class="verdict">確認中…</p>
+    <ul id="capList" class="cap-list"></ul>
+    <button id="copyCapsBtn" class="btn btn-small" type="button">結果をコピー</button>
+    <p id="buildId" class="muted"></p>
+  </section>
+
+  <footer class="footer">
+    <p>カット・トリム・速度・dB表示・音の仕上げ・無音カット・字幕まで実装済み（映像フィルターとマーカーは次のステップ）</p>
+  </footer>
+</main>
+
+<script type="module" src="./src/main.js"></script>
+</body>
+</html>

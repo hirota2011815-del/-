@@ -1,0 +1,21 @@
+<!doctype html>
+<html lang="ja">
+<head><meta charset="utf-8"><title>test harness</title><link rel="icon" href="data:,"></head>
+<body>
+<pre id="out">ready</pre>
+<script type="module">
+import { runSuite } from './browser-suite.js';
+import { runInteractionSuite } from './timeline-interaction.js';
+import { runWaveformSuite } from './waveform-analysis.js';
+import { runAudioEffectsSuite } from './audio-effects.js';
+import { runSubtitleSuite } from './subtitle-burn.js';
+import { runSubtitlePanelSuite } from './subtitle-panel.js';
+window.__runSuite = runSuite;
+window.__runInteractionSuite = runInteractionSuite;
+window.__runWaveformSuite = runWaveformSuite;
+window.__runAudioEffectsSuite = runAudioEffectsSuite;
+window.__runSubtitleSuite = runSubtitleSuite;
+window.__runSubtitlePanelSuite = runSubtitlePanelSuite;
+</script>
+</body>
+</html>
