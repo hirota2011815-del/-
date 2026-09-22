@@ -89,8 +89,8 @@ try {
           libraryUrl: `http://localhost:${p}${new URL(LIB).pathname}`,
           remoteHost: `http://localhost:${p}/hf/`,
           wasmPaths: {
-            mjs: `http://localhost:${p}/ort/ort-wasm-simd-threaded.asyncify.mjs`,
-            wasm: `http://localhost:${p}/ort/ort-wasm-simd-threaded.asyncify.wasm`,
+            mjs: `http://localhost:${p}/ort/ort-wasm-simd-threaded.mjs`,
+            wasm: `http://localhost:${p}/ort/ort-wasm-simd-threaded.wasm`,
           },
         },
       });

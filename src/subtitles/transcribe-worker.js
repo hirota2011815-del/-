@@ -29,28 +29,38 @@ import { planWindows } from './windows.js';
 const DTYPE = 'q8';
 
 /**
- * どちらで走らせるかを **先に決める**。1回のワーカーで試すのは1つだけ。
+ * どれで走らせるか。**既定はWASM**（CPU）で、WebGPUは自分からは選ばない。
  *
- * ここを「WebGPUで試して駄目ならWASM」という作りにしてはいけない。
- * ONNX Runtime は推論セッションの作成を1本のPromiseの鎖に並べて直列化しており
+ * WebGPUのほうが速いが、実機（iPhone）ではタブごと落ちた。落ちると `try/catch` では
+ * 掴めず、画面が読み込み直されて開いていた動画まで消える。**遅いほうがまだましなので、
+ * 確実に動くWASMを既定にしている。**
+ *
+ * 1回のワーカーで試すのは1つだけ、というのも守る必要がある。
+ * ONNX Runtime は推論セッションの作成を1本のPromiseの鎖に並べて直列化していて
  * （`chain = chain.then(create)`）、一度その鎖が失敗すると、あとから積んだ分も
- * 同じ失敗を受け継いで実行されない。つまり同じワーカーの中では、WebGPUが落ちた
- * 時点でWASMも必ず落ちる（しかも報告されるのはWebGPU側のエラー文言）。
- *
- * そこで、**失敗するセッションを作らない**ようにする。
- * GPUが実際に取れるかを先に確かめ、取れたときだけWebGPUを選ぶ。
- * それでも駄目だった場合は、呼び出し側が新しいワーカーでWASMを指定してやり直す
- * （ワーカーを作り直せば鎖も作り直される）。
+ * 同じ失敗を受け継いで実行されない。つまり同じワーカーの中で「駄目ならこっち」は
+ * 成立しない（しかも報告されるのは最初の失敗の文言になる）。
+ * やり直すときは呼び出し側がワーカーごと作り直す。
  */
 async function pickDevice(forceDevice) {
-  if (forceDevice) return forceDevice;
-  try {
-    const adapter = await navigator.gpu?.requestAdapter();
-    if (adapter) return 'webgpu';
-  } catch {
-    /* WebGPUが無い・使えない端末。WASMで走らせる。 */
-  }
-  return 'wasm';
+  return forceDevice ?? 'wasm';
+}
+
+/**
+ * WASMで走らせるときは、軽いほうの実行ファイルを使う。
+ *
+ * ライブラリは既定で asyncify 版（27MB）を選ぶ。これはWebGPUなどの非同期処理の
+ * ために要るもので、CPUだけで回すなら通常版（14MB）で足りる。
+ * 13MB少なく済むぶん、メモリで落ちる余地が減る（手元の検証では速度も変わらない）。
+ */
+function useLighterWasm(env) {
+  const version = env.backends?.onnx?.versions?.web;
+  if (!version || !env.backends?.onnx?.wasm) return;
+  const base = `https://cdn.jsdelivr.net/npm/onnxruntime-web@${version}/dist/`;
+  env.backends.onnx.wasm.wasmPaths = {
+    mjs: `${base}ort-wasm-simd-threaded.mjs`,
+    wasm: `${base}ort-wasm-simd-threaded.wasm`,
+  };
 }
 
 let canceled = false;
@@ -176,6 +186,7 @@ async function loadModel({ model, post, checkCanceled, endpoints, forceDevice })
   };
 
   const device = await pickDevice(forceDevice);
+  if (device === 'wasm' && !endpoints?.wasmPaths) useLighterWasm(env);
   checkCanceled();
 
   try {

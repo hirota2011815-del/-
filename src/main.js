@@ -14,7 +14,9 @@ import {
 } from './audio/silence.js';
 import { WaveformAnalyzer } from './audio/waveform-controller.js';
 import { concatFloat32, getAudioChannelCount } from './audio/waveform.js';
+import { clear as clearBreadcrumb, describe as describeBreadcrumb, note, read as readBreadcrumb } from './core/breadcrumb.js';
 import { detectCapabilities, describeCapabilities, verdictMessage } from './core/capabilities.js';
+import { clearFile, loadFile, peekFile, saveFile } from './core/file-store.js';
 import { BUILD_ID } from './core/version.js';
 import {
   SPEEDS,
@@ -89,6 +91,13 @@ const dom = {
   transcribeBar: el('transcribeBar'),
   transcribeText: el('transcribeText'),
   transcribeError: el('transcribeError'),
+  restoreBox: el('restoreBox'),
+  restoreText: el('restoreText'),
+  restoreBtn: el('restoreBtn'),
+  restoreDismissBtn: el('restoreDismissBtn'),
+  crashNotice: el('crashNotice'),
+  crashText: el('crashText'),
+  copyCrashBtn: el('copyCrashBtn'),
 };
 
 /** 字幕パネルが使う要素だけをまとめたもの。 */
@@ -151,6 +160,10 @@ async function boot() {
   renderSubtitlePanel();
   wireEvents();
 
+  // 前回、重い処理の途中でタブごと落ちていたらここで知らせる
+  showPreviousCrash();
+  offerRestore();
+
   state.capabilities = await detectCapabilities();
   renderCapabilities(state.capabilities);
   updateExportAvailability();
@@ -182,6 +195,12 @@ function wireEvents() {
   dom.silenceCutBtn.addEventListener('click', applySilenceCut);
   dom.silenceUndoBtn.addEventListener('click', undoSilenceCut);
   dom.transcribeBtn.addEventListener('click', startTranscribe);
+  dom.restoreBtn.addEventListener('click', restorePreviousFile);
+  dom.restoreDismissBtn.addEventListener('click', async () => {
+    dom.restoreBox.hidden = true;
+    await clearFile();
+  });
+  dom.copyCrashBtn.addEventListener('click', copyCrashNotice);
   dom.transcribeCancelBtn.addEventListener('click', () => transcriber.cancel());
 
   /*
@@ -344,6 +363,60 @@ async function openFile(file) {
   onPlayerTimeUpdate();
 
   analyzeWaveformFor(file);
+  // 途中でタブが落ちても開き直せるよう、動画そのものを端末に覚えておく。
+  // 失敗しても編集は続けられるので、結果は待たないし見ない。
+  saveFile(file).then((saved) => {
+    if (!saved) console.info('動画を覚えておけませんでした（容量不足など）。編集は続けられます。');
+  });
+}
+
+/* ---- 落ちたあとの復帰 ------------------------------------------------------ */
+
+/** 前回、重い処理の途中で終わっていたら知らせる（タブごと落ちた形跡）。 */
+function showPreviousCrash() {
+  const crumb = readBreadcrumb();
+  if (!crumb) return;
+  dom.crashText.textContent =
+    `前回、${describeBreadcrumb(crumb)}。`
+    + '途中でページが読み込み直された可能性があります（端末のメモリ不足など）。';
+  dom.crashNotice.hidden = false;
+}
+
+async function copyCrashNotice() {
+  try {
+    await navigator.clipboard.writeText(
+      `${dom.crashText.textContent}\nuserAgent: ${navigator.userAgent}`,
+    );
+    dom.copyCrashBtn.textContent = 'コピーしました';
+  } catch {
+    dom.copyCrashBtn.textContent = 'コピーできませんでした';
+  }
+}
+
+/** 前回開いていた動画が残っていれば、開き直せるようにする。 */
+async function offerRestore() {
+  const meta = await peekFile();
+  if (!meta) return;
+  dom.restoreText.textContent = `前回開いていた動画が残っています: ${meta.name}（${formatBytes(meta.size)}）`;
+  dom.restoreBox.hidden = false;
+}
+
+async function restorePreviousFile() {
+  dom.restoreBtn.disabled = true;
+  dom.restoreBtn.textContent = '読み込んでいます…';
+  try {
+    const file = await loadFile();
+    if (!file) {
+      dom.restoreText.textContent = '前回の動画を読み出せませんでした。開き直してください。';
+      return;
+    }
+    dom.restoreBox.hidden = true;
+    // 保存済みの編集リストは名前・大きさ・更新日時で引くので、そのまま続きから開く
+    await openFile(file);
+  } finally {
+    dom.restoreBtn.disabled = false;
+    dom.restoreBtn.textContent = '前回の動画を開く';
+  }
 }
 
 function waitForDuration(video) {
@@ -723,6 +796,9 @@ async function startTranscribe() {
   if (state.transcribing || !state.file || !state.editList) return;
 
   state.transcribing = true;
+  // 落ちたときに「どこまで進んでいたか」だけは残るようにする
+  note('文字起こし', '始めたところ', { model: state.transcribeModel }, true);
+  dom.crashNotice.hidden = true;
   dom.transcribeError.hidden = true;
   dom.transcribeProgress.hidden = false;
   dom.transcribeCancelBtn.hidden = false;
@@ -741,11 +817,18 @@ async function startTranscribe() {
       // 波形が出そろっていれば、区切りを静かなところへ寄せられる。
       waveform: state.waveformComplete ? state.waveform : null,
       model: state.transcribeModel,
-      onProgress: (p) => setTranscribeProgress(p.ratio, transcribeLabel(p)),
+      onProgress: (p) => {
+        const label = transcribeLabel(p);
+        setTranscribeProgress(p.ratio, label);
+        note('文字起こし', label, { model: state.transcribeModel, device: transcriber.backend });
+      },
       onPartial: (partial) => applyTranscript(partial, false),
     });
     applyTranscript(segments, true);
+    clearBreadcrumb();
   } catch (err) {
+    // 自分で止めた・掴めたエラーなら「落ちた」ではないので記録は消す
+    clearBreadcrumb();
     if (err?.name === 'TranscribeCanceled') {
       dom.transcribeText.textContent = '中止しました。ここまでの字幕は残ります。';
     } else {

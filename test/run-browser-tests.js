@@ -99,6 +99,16 @@ try {
     if (!r.pass) failed += 1;
   }
 
+  /* --- 1.11. 落ちたあとの復帰 --- */
+  await page.waitForFunction(() => typeof window.__runRecoverySuite === 'function');
+  const recoveryResults = await page.evaluate(() => window.__runRecoverySuite());
+
+  console.log('\n落ちたあとの復帰');
+  for (const r of recoveryResults) {
+    console.log(`  ${r.pass ? 'PASS' : 'FAIL'}  ${r.name}${r.detail ? `  (${r.detail})` : ''}`);
+    if (!r.pass) failed += 1;
+  }
+
   /* --- 2. 画面が組み上がるか --- */
   console.log('\n画面');
   const errors = [];
@@ -133,6 +143,8 @@ try {
     transcribeDisabled: document.getElementById('transcribeBtn').disabled,
     subtitleOverlayHidden: document.getElementById('subtitleOverlay').hidden,
     subtitleListText: document.getElementById('subtitleList').textContent,
+    restoreHidden: document.getElementById('restoreBox').hidden,
+    crashHidden: document.getElementById('crashNotice').hidden,
   }));
 
   const uiChecks = [
@@ -158,6 +170,8 @@ try {
     ['動画未読み込みでは文字起こしできない', ui.transcribeDisabled === true],
     ['字幕が無いときはプレビューに重ならない', ui.subtitleOverlayHidden === true],
     ['字幕が無いときは一覧に案内が出る', ui.subtitleListText.includes('まだ字幕がありません'), ui.subtitleListText.trim().slice(0, 30)],
+    ['復帰の案内は、必要なときだけ出る', ui.restoreHidden === true && ui.crashHidden === true,
+      `復元 ${ui.restoreHidden} / 記録 ${ui.crashHidden}`],
     ['JSエラーが出ない', errors.length === 0, errors.join(' | ')],
   ];
   for (const [name, pass, detail] of uiChecks) {

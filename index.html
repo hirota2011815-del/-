@@ -33,6 +33,17 @@
     </div>
     <input id="fileInput" class="visually-hidden" type="file" accept="video/*">
     <p id="sourceInfo" class="muted"></p>
+    <div id="restoreBox" class="restore-box" hidden>
+      <p id="restoreText" class="restore-text"></p>
+      <div class="restore-actions">
+        <button id="restoreBtn" class="btn btn-primary btn-small" type="button">前回の動画を開く</button>
+        <button id="restoreDismissBtn" class="btn btn-small" type="button">消す</button>
+      </div>
+    </div>
+    <div id="crashNotice" class="crash-notice" hidden>
+      <p id="crashText" class="crash-text"></p>
+      <button id="copyCrashBtn" class="btn btn-small" type="button">この内容をコピー</button>
+    </div>
   </section>
 
   <!-- 3. タイムライン -->
@@ -86,6 +97,10 @@
       <p class="muted">
         話している言葉を聞き取って、字幕の下書きを作ります。聞き取りは端末の中だけで行い、
         動画も音声もどこにも送りません。初回だけ聞き取りの部品をダウンロードします（2回目以降は不要）。
+      </p>
+      <p class="muted">
+        端末には重い処理です。途中で画面が読み込み直されてしまうときは「軽い」を選んでください。
+        開いていた動画は覚えてあるので、その場合も開き直せます。
       </p>
       <div class="threshold-row">
         <span class="threshold-label">聞き取りの精度</span>

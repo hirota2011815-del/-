@@ -12,17 +12,22 @@ const WORKER_URL = new URL('./transcribe-worker.js', import.meta.url);
 export const MODELS = [
   {
     id: 'onnx-community/whisper-tiny',
-    label: '速い',
-    note: '約41MB・聞き取りは粗め',
+    label: '軽い',
+    note: '約41MB・まずこちら',
   },
   {
     id: 'onnx-community/whisper-base',
-    label: 'ふつう',
-    note: '約77MB・おすすめ',
+    label: 'よく聞く',
+    note: '約77MB・端末によっては重い',
   },
 ];
 
-export const DEFAULT_MODEL_ID = 'onnx-community/whisper-base';
+/**
+ * 既定は小さいほう。
+ * 大きいモデルは聞き取りが良いが、実機ではメモリが足りずにタブごと落ちた。
+ * 落ちると開いていた動画まで消えるので、まず確実に終わるほうから試せるようにする。
+ */
+export const DEFAULT_MODEL_ID = 'onnx-community/whisper-tiny';
 
 /** 日本語で固定する。区間ごとに言語を推測させると、短い区間で判定が揺れるため。 */
 export const DEFAULT_LANGUAGE = 'ja';

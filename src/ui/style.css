@@ -545,3 +545,30 @@ html, body {
   white-space: nowrap;
   text-overflow: ellipsis;
 }
+
+/* ---- 落ちたあとの復帰 ------------------------------------------------------ */
+
+.restore-box,
+.crash-notice {
+  margin-top: 10px;
+  padding: 10px 12px;
+  border-radius: 10px;
+  border: 1px solid var(--line);
+  background: var(--panel-2);
+}
+
+.crash-notice { border-color: var(--warn); }
+
+.restore-text,
+.crash-text {
+  margin: 0 0 8px;
+  font-size: 0.85rem;
+  line-height: 1.45;
+}
+
+.crash-text { color: var(--warn); }
+
+.restore-actions {
+  display: flex;
+  gap: 8px;
+}
